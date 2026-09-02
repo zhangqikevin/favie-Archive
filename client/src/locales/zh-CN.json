@@ -799,7 +799,12 @@
     "button_opening": "打开中…",
     "paste_key_placeholder": "粘贴你的 API key",
     "paste_key_connect": "连接",
-    "empty": "暂时还没有可用的连接器。"
+    "empty": "暂时还没有可用的连接器。",
+    "tab_browse": "浏览",
+    "tab_connected": "已连接",
+    "search_placeholder": "搜索应用…",
+    "load_more": "加载更多",
+    "none_connected": "你还没有连接任何应用——去「浏览」里连接一个吧。"
   },
   "activity": {
     "title": "活动记录",

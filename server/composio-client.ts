@@ -64,3 +64,62 @@ export async function deleteComposioConnection(apiKey: string, connectedAccountI
     method: "DELETE",
   });
 }
+
+export interface ComposioToolkit {
+  slug: string;
+  name: string;
+  logo: string | null;
+  description: string | null;
+  categories: string[];
+  /** false when this toolkit needs a bring-your-own OAuth app — we can't self-serve those. */
+  selfServeCapable: boolean;
+}
+
+export interface ComposioToolkitPage {
+  items: ComposioToolkit[];
+  nextCursor: string | null;
+}
+
+/** The full catalog of apps Composio can connect to, for the "browse" tab. */
+export async function listComposioToolkits(
+  apiKey: string,
+  opts: { search?: string; cursor?: string; limit?: number } = {},
+): Promise<ComposioToolkitPage> {
+  const params = new URLSearchParams({ limit: String(opts.limit ?? 50) });
+  if (opts.search) params.set("search", opts.search);
+  if (opts.cursor) params.set("cursor", opts.cursor);
+  const data = await composioFetch(apiKey, `/toolkits?${params.toString()}`);
+  const items: ComposioToolkit[] = (data.items ?? []).map((t: any) => ({
+    slug: t.slug,
+    name: t.name,
+    logo: t.meta?.logo ?? null,
+    description: t.meta?.description ?? null,
+    categories: (t.meta?.categories ?? []).map((c: any) => c.name),
+    selfServeCapable: t.no_auth === true || (t.composio_managed_auth_schemes ?? []).length > 0,
+  }));
+  return { items, nextCursor: data.next_cursor ?? null };
+}
+
+/** Composio-managed (no BYO OAuth app needed) auth config for one toolkit, creating it if needed. */
+export async function ensureComposioAuthConfig(apiKey: string, toolkitSlug: string): Promise<string> {
+  const data = await composioFetch(apiKey, "/auth_configs", {
+    method: "POST",
+    body: JSON.stringify({ toolkit: { slug: toolkitSlug }, auth_config: { type: "use_composio_managed_auth" } }),
+  });
+  return data.auth_config.id as string;
+}
+
+/** A Composio "MCP server" bound to one auth config — the thing our proxy's targetUrl points at. */
+export async function createComposioMcpServer(apiKey: string, name: string, authConfigId: string): Promise<string> {
+  const data = await composioFetch(apiKey, "/mcp/servers", {
+    method: "POST",
+    body: JSON.stringify({ name, auth_config_ids: [authConfigId] }),
+  });
+  return data.id as string;
+}
+
+/** Composio's actual MCP protocol endpoint for a server — note the `/mcp` suffix, which
+ * the bare `/v3/mcp/{id}` path silently drops (307-redirects to a useless fallback tool). */
+export function composioMcpServerUrl(composioServerId: string): string {
+  return `https://backend.composio.dev/v3/mcp/${composioServerId}/mcp`;
+}

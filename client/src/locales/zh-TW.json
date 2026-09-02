@@ -799,7 +799,12 @@
     "button_opening": "開啟中…",
     "paste_key_placeholder": "貼上你的 API key",
     "paste_key_connect": "連接",
-    "empty": "暫時還沒有可用的連接器。"
+    "empty": "暫時還沒有可用的連接器。",
+    "tab_browse": "瀏覽",
+    "tab_connected": "已連接",
+    "search_placeholder": "搜尋應用…",
+    "load_more": "載入更多",
+    "none_connected": "你還沒有連接任何應用——去「瀏覽」裡連接一個吧。"
   },
   "activity": {
     "title": "活動記錄",

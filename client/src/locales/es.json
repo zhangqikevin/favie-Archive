@@ -799,7 +799,12 @@
     "button_opening": "Abriendo…",
     "paste_key_placeholder": "Pega tu clave de API",
     "paste_key_connect": "Conectar",
-    "empty": "Aún no hay conectores disponibles."
+    "empty": "Aún no hay conectores disponibles.",
+    "tab_browse": "Explorar",
+    "tab_connected": "Conectados",
+    "search_placeholder": "Buscar apps…",
+    "load_more": "Cargar más",
+    "none_connected": "Todavía no has conectado nada — explora las apps para conectar una."
   },
   "activity": {
     "title": "Actividad",

@@ -799,7 +799,12 @@
     "button_opening": "Opening…",
     "paste_key_placeholder": "Paste your API key",
     "paste_key_connect": "Connect",
-    "empty": "No connectors available yet."
+    "empty": "No connectors available yet.",
+    "tab_browse": "Browse",
+    "tab_connected": "Connected",
+    "search_placeholder": "Search apps…",
+    "load_more": "Load more",
+    "none_connected": "You haven't connected anything yet — browse apps to connect one."
   },
   "activity": {
     "title": "Activity",

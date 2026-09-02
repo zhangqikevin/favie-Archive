@@ -24,7 +24,13 @@ import { registerAdminRoutes } from "./admin-routes";
 import { registerMcpProxyRoutes } from "./mcp-proxy";
 import { ensurePreviewUser, ensureFavieDataMcpServer } from "./zoowork-admin";
 import { encryptSecret, decryptSecret } from "./crypto";
-import { startComposioConnection, findComposioConnection, deleteComposioConnection } from "./composio-client";
+import { findComposioConnection, deleteComposioConnection, listComposioToolkits } from "./composio-client";
+import {
+  composioApiKey,
+  startToolkitConnection,
+  checkToolkitConnectionStatus,
+  listConnectedConnectors,
+} from "./connectors-service";
 import { getLogs } from "./log-buffer";
 import * as zwChannels from "./zoowork-channels";
 import { ChannelApiError } from "./zoowork-channels";
@@ -620,29 +626,81 @@ export async function registerRoutes(
     }
   });
 
-  // POST /api/mcp/connect-oauth — start a hosted Composio connection for an
-  // OAuth-style server. Returns a redirect_url for the client to open; the
-  // callback just lands back on the Connectors page, which polls /api/mcp/available
-  // to notice the new connection (see self-heal above) rather than us needing a
-  // dedicated server-side OAuth callback route.
-  app.post("/api/mcp/connect-oauth", async (req, res) => {
+  // GET /api/connectors/catalog — every app Composio can self-serve connect (i.e. we
+  // don't need a sysadmin to bring their own OAuth client for it), paginated/searchable,
+  // for the Connectors page's "Browse" tab. Cross-referenced with which ones this user
+  // has already connected.
+  app.get("/api/connectors/catalog", async (req, res) => {
     if (!req.isAuthenticated() || !req.user) {
       return res.status(401).json({ message: "Not authenticated" });
     }
     try {
-      const { mcpServerId } = z.object({ mcpServerId: z.string().min(1) }).parse(req.body);
-      const server = await storage.getMcpServer(mcpServerId);
-      if (!server) return res.status(404).json({ message: "MCP server not found" });
-      if (server.authStyle !== "query_param_shared_key" || !server.oauthConfigId || !server.encryptedAdminKey) {
-        return res.status(400).json({ message: "This connector does not support OAuth connect" });
-      }
-      const adminKey = decryptSecret(server.encryptedAdminKey);
+      const search = typeof req.query.search === "string" ? req.query.search : undefined;
+      const cursor = typeof req.query.cursor === "string" ? req.query.cursor : undefined;
+      const page = await listComposioToolkits(composioApiKey(), { search, cursor, limit: 40 });
+      const connected = new Set((await listConnectedConnectors(req.user.id)).map((c) => c.key));
+      res.json({
+        items: page.items
+          .filter((t) => t.selfServeCapable)
+          .map((t) => ({ ...t, connected: connected.has(t.slug) })),
+        nextCursor: page.nextCursor,
+      });
+    } catch (err: any) {
+      res.status(500).json({ message: err.message || "Failed to load connector catalog" });
+    }
+  });
+
+  // POST /api/connectors/catalog/:slug/connect — start a hosted Composio OAuth connection
+  // for this toolkit, provisioning its mcpServers row on first-ever use. Returns a
+  // redirect_url for the client to open; the callback just lands back on the Connectors
+  // page, which polls /api/connectors/catalog/:slug/status to notice completion.
+  app.post("/api/connectors/catalog/:slug/connect", async (req, res) => {
+    if (!req.isAuthenticated() || !req.user) {
+      return res.status(401).json({ message: "Not authenticated" });
+    }
+    try {
+      const { name, description } = z
+        .object({ name: z.string().min(1), description: z.string().nullable().optional() })
+        .parse(req.body);
       const callbackUrl = `${req.protocol}://${req.get("host")}/admin/connectors`;
-      const { redirectUrl } = await startComposioConnection(adminKey, server.oauthConfigId, req.user.id, callbackUrl);
+      const { redirectUrl } = await startToolkitConnection(
+        req.params.slug,
+        name,
+        description ?? null,
+        req.user.id,
+        callbackUrl,
+      );
       res.json({ redirectUrl });
     } catch (err: any) {
       if (err?.name === "ZodError") return res.status(400).json({ message: err.errors[0]?.message || "Invalid input" });
       res.status(500).json({ message: err.message || "Failed to start connection" });
+    }
+  });
+
+  // GET /api/connectors/catalog/:slug/status — self-heals and reports whether this
+  // user's connection for one toolkit has gone ACTIVE yet; polled while "connecting".
+  app.get("/api/connectors/catalog/:slug/status", async (req, res) => {
+    if (!req.isAuthenticated() || !req.user) {
+      return res.status(401).json({ message: "Not authenticated" });
+    }
+    try {
+      res.json(await checkToolkitConnectionStatus(req.params.slug, req.user.id));
+    } catch (err: any) {
+      res.status(500).json({ message: err.message || "Failed to check connection status" });
+    }
+  });
+
+  // GET /api/connectors/connected — everything this user has connected, for the
+  // Connectors page's "Connected" management tab. Unlike GET /api/mcp/available (used by
+  // the in-chat MCP panel), this isn't scoped to any one agent's bindings.
+  app.get("/api/connectors/connected", async (req, res) => {
+    if (!req.isAuthenticated() || !req.user) {
+      return res.status(401).json({ message: "Not authenticated" });
+    }
+    try {
+      res.json({ items: await listConnectedConnectors(req.user.id) });
+    } catch (err: any) {
+      res.status(500).json({ message: err.message || "Failed to list connected connectors" });
     }
   });
 
