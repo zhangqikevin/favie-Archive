@@ -132,16 +132,21 @@ export async function listOrgSkills() {
 }
 
 /**
- * MCP servers bound to this catalog entry that this customer has already
- * supplied a key for, paired with their credential — the ones actually live
- * on their agent right now. Anything bound-but-not-yet-connected is omitted;
- * the persona's connect hint tells the model to point the user at the
- * Connect button for those instead.
+ * MCP servers this customer has already supplied a key for, paired with their
+ * credential — the ones actually live on their agent right now. Two kinds count:
+ * servers a sysadmin explicitly bound to this catalog entry (agentMcpBindings), and
+ * servers with no binding at all — those are the ones a customer provisioned
+ * themselves via the Connectors "Browse" tab, which aren't scoped to any one agent
+ * and become available to every agent of theirs as soon as they connect. Anything
+ * bound-but-not-yet-connected is omitted; the persona's connect hint tells the model
+ * to point the user at the Connect button for those instead.
  */
 async function getConnectedMcpServers(userId: string, catalogId: string) {
   const boundServers = await storage.getMcpServersForAgent(catalogId);
-  const connected: { server: (typeof boundServers)[number]; credential: UserMcpCredential }[] = [];
-  for (const server of boundServers) {
+  const unboundServers = await storage.getUnboundMcpServers();
+  const candidates = [...boundServers, ...unboundServers];
+  const connected: { server: (typeof candidates)[number]; credential: UserMcpCredential }[] = [];
+  for (const server of candidates) {
     const cred = await storage.getUserMcpCredential(userId, server.id);
     if (cred) connected.push({ server, credential: cred });
   }

@@ -96,6 +96,7 @@ export interface IStorage {
   getAgentMcpServerIds(agentCatalogId: string): Promise<string[]>;
   setAgentMcpBindings(agentCatalogId: string, mcpServerIds: string[]): Promise<void>;
   getMcpServersForAgent(agentCatalogId: string): Promise<McpServer[]>;
+  getUnboundMcpServers(): Promise<McpServer[]>;
 
   getUserMcpCredential(userId: string, mcpServerId: string): Promise<UserMcpCredential | undefined>;
   getUserMcpCredentialByToken(proxyToken: string): Promise<UserMcpCredential | undefined>;
@@ -570,6 +571,20 @@ export class DatabaseStorage implements IStorage {
     const all = await this.listMcpServers();
     const idSet = new Set(ids);
     return all.filter((s) => idSet.has(s.id));
+  }
+
+  /**
+   * Servers with no agentMcpBindings row at all, in any catalog entry — i.e. never
+   * explicitly scoped by a sysadmin. These are the ones a customer provisioned themselves
+   * via the Connectors "Browse" tab (server/connectors-service.ts), and are meant to be
+   * available to every one of that customer's agents once they connect it, not gated
+   * behind a separate admin step.
+   */
+  async getUnboundMcpServers(): Promise<McpServer[]> {
+    const allBindings = await db.select({ mcpServerId: agentMcpBindings.mcpServerId }).from(agentMcpBindings);
+    const boundIds = new Set(allBindings.map((b) => b.mcpServerId));
+    const all = await this.listMcpServers();
+    return all.filter((s) => !boundIds.has(s.id));
   }
 
   async getUserMcpCredential(userId: string, mcpServerId: string): Promise<UserMcpCredential | undefined> {
