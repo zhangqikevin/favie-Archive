@@ -297,6 +297,23 @@ export const userMcpCredentials = pgTable("user_mcp_credentials", {
 export type UserMcpCredential = typeof userMcpCredentials.$inferSelect;
 export type InsertUserMcpCredential = typeof userMcpCredentials.$inferInsert;
 
+// Which of a customer's own agents can use one of their self-serve connections
+// (mcpServers.source "composio_catalog" or "user_custom" — see server/connectors-service.ts).
+// The customer picks this themselves on the Plug-ins page's Connected view; it has no
+// bearing on sysadmin-managed servers, which stay governed by agentMcpBindings alone.
+export const userMcpAgentBindings = pgTable("user_mcp_agent_bindings", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  userId: varchar("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  mcpServerId: varchar("mcp_server_id").notNull().references(() => mcpServers.id, { onDelete: "cascade" }),
+  agentCatalogId: varchar("agent_catalog_id").notNull().references(() => agentCatalog.id, { onDelete: "cascade" }),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (t) => [
+  index("user_mcp_agent_bindings_user_server_idx").on(t.userId, t.mcpServerId),
+  index("user_mcp_agent_bindings_user_agent_idx").on(t.userId, t.agentCatalogId),
+]);
+
+export type UserMcpAgentBinding = typeof userMcpAgentBindings.$inferSelect;
+
 // ─── Restaurant Data Onboarding ─────────────────────────────────────────────────
 // Step 2 of the post-login restaurant wizard: at least one of these six rows must
 // end up `connected` before the customer can move on. `permission` platforms

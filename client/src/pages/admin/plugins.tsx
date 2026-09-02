@@ -262,6 +262,7 @@ function ConnectedList({
               {t("connectors_page.status_connected")}
             </span>
           </div>
+          <AgentAccessSelector mcpServerId={item.mcpServerId} />
           <div className="px-4 pb-3 flex justify-end">
             <button
               onClick={() => disconnectMutation.mutate(item.mcpServerId)}
@@ -274,6 +275,66 @@ function ConnectedList({
           </div>
         </div>
       ))}
+    </div>
+  );
+}
+
+interface MyAgent {
+  id: string;
+  key: string;
+  name: string;
+  description: string | null;
+}
+
+// Lets the customer pick which of their own agents can use one self-serve connection —
+// sysadmin-managed servers never show up here at all (see server/zoowork-admin.ts).
+function AgentAccessSelector({ mcpServerId }: { mcpServerId: string }) {
+  const { t } = useTranslation();
+  const queryClient = useQueryClient();
+  const agentsKey = "/api/agent/my-agents";
+  const bindingsKey = `/api/connectors/${mcpServerId}/agents`;
+  const { data: myAgentsData } = useQuery<{ agents: MyAgent[] }>({ queryKey: [agentsKey] });
+  const { data: enabledData, isLoading } = useQuery<{ agentCatalogIds: string[] }>({ queryKey: [bindingsKey] });
+  const agents = myAgentsData?.agents ?? [];
+  const enabled = new Set(enabledData?.agentCatalogIds ?? []);
+
+  const toggleMutation = useMutation({
+    mutationFn: (agentCatalogIds: string[]) => apiRequest("PUT", bindingsKey, { agentCatalogIds }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: [bindingsKey] }),
+  });
+
+  if (agents.length === 0) return null;
+
+  const toggle = (agentId: string) => {
+    const next = new Set(enabled);
+    if (next.has(agentId)) next.delete(agentId);
+    else next.add(agentId);
+    toggleMutation.mutate(Array.from(next));
+  };
+
+  return (
+    <div className="px-4 pb-3 pt-0.5">
+      <p className="text-xs font-medium text-muted-foreground mb-1.5">{t("connectors_page.available_to_agents")}</p>
+      <div className="flex flex-wrap gap-1.5">
+        {isLoading ? (
+          <Loader2 className="w-3.5 h-3.5 animate-spin text-muted-foreground" />
+        ) : (
+          agents.map((agent) => (
+            <button
+              key={agent.id}
+              onClick={() => toggle(agent.id)}
+              disabled={toggleMutation.isPending}
+              className={cn(
+                "px-2.5 py-1 rounded-full text-xs font-medium transition-colors",
+                enabled.has(agent.id) ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground hover:bg-muted/70",
+              )}
+              data-testid={`agent-toggle-${agent.id}`}
+            >
+              {agent.name}
+            </button>
+          ))
+        )}
+      </div>
     </div>
   );
 }

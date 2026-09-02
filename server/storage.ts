@@ -21,6 +21,7 @@ import {
   mcpServers, type McpServer, type InsertMcpServer,
   agentMcpBindings,
   userMcpCredentials, type UserMcpCredential,
+  userMcpAgentBindings,
   restaurantPlatformConnections, type RestaurantPlatformConnection,
 } from "@shared/schema";
 
@@ -96,7 +97,9 @@ export interface IStorage {
   getAgentMcpServerIds(agentCatalogId: string): Promise<string[]>;
   setAgentMcpBindings(agentCatalogId: string, mcpServerIds: string[]): Promise<void>;
   getMcpServersForAgent(agentCatalogId: string): Promise<McpServer[]>;
-  getSelfServeMcpServers(): Promise<McpServer[]>;
+  getUserMcpAgentBindings(userId: string, mcpServerId: string): Promise<string[]>;
+  setUserMcpAgentBindings(userId: string, mcpServerId: string, agentCatalogIds: string[]): Promise<void>;
+  getEnabledSelfServeMcpServersForUserAgent(userId: string, agentCatalogId: string): Promise<McpServer[]>;
 
   getUserMcpCredential(userId: string, mcpServerId: string): Promise<UserMcpCredential | undefined>;
   getUserMcpCredentialByToken(proxyToken: string): Promise<UserMcpCredential | undefined>;
@@ -573,17 +576,41 @@ export class DatabaseStorage implements IStorage {
     return all.filter((s) => idSet.has(s.id));
   }
 
+  /** Agent catalog ids the customer has enabled this self-serve connection for. */
+  async getUserMcpAgentBindings(userId: string, mcpServerId: string): Promise<string[]> {
+    const rows = await db
+      .select({ agentCatalogId: userMcpAgentBindings.agentCatalogId })
+      .from(userMcpAgentBindings)
+      .where(and(eq(userMcpAgentBindings.userId, userId), eq(userMcpAgentBindings.mcpServerId, mcpServerId)));
+    return rows.map((r) => r.agentCatalogId);
+  }
+
+  async setUserMcpAgentBindings(userId: string, mcpServerId: string, agentCatalogIds: string[]): Promise<void> {
+    await db
+      .delete(userMcpAgentBindings)
+      .where(and(eq(userMcpAgentBindings.userId, userId), eq(userMcpAgentBindings.mcpServerId, mcpServerId)));
+    if (agentCatalogIds.length > 0) {
+      await db
+        .insert(userMcpAgentBindings)
+        .values(agentCatalogIds.map((agentCatalogId) => ({ userId, mcpServerId, agentCatalogId })));
+    }
+  }
+
   /**
-   * Servers a customer provisioned themselves — via the Connectors "Browse" tab
-   * (source "composio_catalog") or their own custom MCP server (source "user_custom") —
-   * as opposed to sysadmin-managed ones (source "sysadmin", the default). These are
-   * available to every one of that customer's agents once they connect one, not gated
-   * behind a separate admin binding step, and are the only ones the customer-facing
-   * Plug-ins page ever shows.
+   * This customer's self-serve connections (source "composio_catalog"/"user_custom")
+   * that they've explicitly enabled for this specific agent, via the Plug-ins page's
+   * Connected view — as opposed to sysadmin-managed servers, which stay governed by
+   * agentMcpBindings alone and are never customer-configurable.
    */
-  async getSelfServeMcpServers(): Promise<McpServer[]> {
+  async getEnabledSelfServeMcpServersForUserAgent(userId: string, agentCatalogId: string): Promise<McpServer[]> {
+    const rows = await db
+      .select({ mcpServerId: userMcpAgentBindings.mcpServerId })
+      .from(userMcpAgentBindings)
+      .where(and(eq(userMcpAgentBindings.userId, userId), eq(userMcpAgentBindings.agentCatalogId, agentCatalogId)));
+    if (rows.length === 0) return [];
+    const ids = new Set(rows.map((r) => r.mcpServerId));
     const all = await this.listMcpServers();
-    return all.filter((s) => s.source !== "sysadmin");
+    return all.filter((s) => ids.has(s.id));
   }
 
   async getUserMcpCredential(userId: string, mcpServerId: string): Promise<UserMcpCredential | undefined> {

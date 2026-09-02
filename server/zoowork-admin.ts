@@ -134,20 +134,20 @@ export async function listOrgSkills() {
 /**
  * MCP servers this customer has already supplied a key for, paired with their
  * credential — the ones actually live on their agent right now. Two kinds count:
- * servers a sysadmin explicitly bound to this catalog entry (agentMcpBindings), and
- * servers the customer provisioned themselves (source "composio_catalog" or
- * "user_custom", see storage.getSelfServeMcpServers) — those aren't scoped to any one
- * agent and become available to every agent of theirs as soon as they connect. Anything
- * bound-but-not-yet-connected is omitted; the persona's connect hint tells the model
- * to point the user at the Connect button for those instead.
+ * servers a sysadmin explicitly bound to this catalog entry (agentMcpBindings) — never
+ * customer-configurable — and the customer's own self-serve connections (source
+ * "composio_catalog" or "user_custom") that they've explicitly enabled for THIS agent on
+ * the Plug-ins page's Connected view (storage.getEnabledSelfServeMcpServersForUserAgent).
+ * Self-serve ones are opt-in per agent, not automatically available everywhere. Anything
+ * bound-but-not-yet-connected is omitted; the persona's connect hint tells the model to
+ * point the user at the Connect button for those instead.
  */
 async function getConnectedMcpServers(userId: string, catalogId: string) {
   const boundServers = await storage.getMcpServersForAgent(catalogId);
-  const selfServeServers = await storage.getSelfServeMcpServers();
-  // A server can be both explicitly bound AND self-serve-eligible (e.g. a sysadmin bound
-  // it to this catalog entry after a customer had already provisioned it via Browse) —
+  const enabledSelfServe = await storage.getEnabledSelfServeMcpServersForUserAgent(userId, catalogId);
+  // A server can be both explicitly bound AND self-serve-enabled for this same agent —
   // dedupe by id or ZooWork rejects the mcp[] array outright ("must be unique server names").
-  const candidates = Array.from(new Map([...boundServers, ...selfServeServers].map((s) => [s.id, s])).values());
+  const candidates = Array.from(new Map([...boundServers, ...enabledSelfServe].map((s) => [s.id, s])).values());
   const connected: { server: (typeof candidates)[number]; credential: UserMcpCredential }[] = [];
   for (const server of candidates) {
     const cred = await storage.getUserMcpCredential(userId, server.id);

@@ -506,6 +506,7 @@ export async function registerRoutes(
       const entitled = await getEntitledSlots(req.user.id);
       res.json({
         agents: entitled.map(({ slot, entry }) => ({
+          id: entry.id,
           key: slot,
           name: entry.name,
           description: entry.description,
@@ -587,50 +588,6 @@ export async function registerRoutes(
     }
   });
 
-  // GET /api/mcp/available — MCP servers offered by the "general" agent template,
-  // with whether the current user has already connected each one. For OAuth-style
-  // servers (authStyle "query_param_shared_key") not yet connected locally, this
-  // also checks Composio directly and self-heals: an ACTIVE remote connection the
-  // user finished via the hosted OAuth page gets its local credential row created
-  // here, and a still-in-flight one is reported as "pending" instead of "connected".
-  app.get("/api/mcp/available", async (req, res) => {
-    if (!req.isAuthenticated() || !req.user) {
-      return res.status(401).json({ message: "Not authenticated" });
-    }
-    try {
-      const entry = await storage.getAgentCatalogByKey("general");
-      if (!entry) return res.json({ mcpServers: [] });
-      const servers = await storage.getMcpServersForAgent(entry.id);
-      const creds = await storage.listUserMcpCredentials(req.user.id);
-      const connectedIds = new Set(creds.map((c) => c.mcpServerId));
-
-      const mcpServers = await Promise.all(
-        servers.map(async (s) => {
-          const base = { id: s.id, key: s.key, name: s.name, description: s.description, authStyle: s.authStyle };
-          if (connectedIds.has(s.id)) return { ...base, connected: true, pending: false };
-          if (s.authStyle !== "query_param_shared_key" || !s.oauthConfigId || !s.encryptedAdminKey) {
-            return { ...base, connected: false, pending: false };
-          }
-          try {
-            const adminKey = decryptSecret(s.encryptedAdminKey);
-            const remote = await findComposioConnection(adminKey, s.oauthConfigId, req.user!.id);
-            if (remote?.status === "ACTIVE") {
-              await storage.upsertUserMcpCredential(req.user!.id, s.id, encryptSecret(req.user!.id));
-              return { ...base, connected: true, pending: false };
-            }
-            const pending = remote ? !["FAILED", "EXPIRED"].includes(remote.status) : false;
-            return { ...base, connected: false, pending };
-          } catch {
-            return { ...base, connected: false, pending: false };
-          }
-        }),
-      );
-      res.json({ mcpServers });
-    } catch (err: any) {
-      res.status(500).json({ message: err.message || "Failed to list MCP servers" });
-    }
-  });
-
   // GET /api/connectors/catalog — every app Composio can self-serve connect (i.e. we
   // don't need a sysadmin to bring their own OAuth client for it), paginated/searchable,
   // for the Connectors page's "Browse" tab. Cross-referenced with which ones this user
@@ -709,8 +666,8 @@ export async function registerRoutes(
   });
 
   // GET /api/connectors/connected — everything this user has connected, for the
-  // Connectors page's "Connected" management tab. Unlike GET /api/mcp/available (used by
-  // the in-chat MCP panel), this isn't scoped to any one agent's bindings.
+  // Connectors page's "Connected" management tab. Not scoped to any one agent —
+  // GET/PUT /api/connectors/:mcpServerId/agents is where the user picks that.
   app.get("/api/connectors/connected", async (req, res) => {
     if (!req.isAuthenticated() || !req.user) {
       return res.status(401).json({ message: "Not authenticated" });
@@ -768,30 +725,46 @@ export async function registerRoutes(
     }
   });
 
-  // POST /api/mcp/connect — save the current user's own key for one MCP server.
-  // Encrypted at rest; never echoed back.
-  app.post("/api/mcp/connect", async (req, res) => {
+  // GET /api/connectors/:mcpServerId/agents — which of this customer's own agents they've
+  // enabled this self-serve connection for (Plug-ins page's Connected view).
+  app.get("/api/connectors/:mcpServerId/agents", async (req, res) => {
     if (!req.isAuthenticated() || !req.user) {
       return res.status(401).json({ message: "Not authenticated" });
     }
     try {
-      const { mcpServerId, apiKey } = z
-        .object({ mcpServerId: z.string().min(1), apiKey: z.string().min(1) })
-        .parse(req.body);
-      const server = await storage.getMcpServer(mcpServerId);
+      const agentCatalogIds = await storage.getUserMcpAgentBindings(req.user.id, req.params.mcpServerId);
+      res.json({ agentCatalogIds });
+    } catch (err: any) {
+      res.status(500).json({ message: err.message || "Failed to load agent selection" });
+    }
+  });
+
+  // PUT /api/connectors/:mcpServerId/agents — replace which of this customer's own
+  // agents can use this connection. Only meaningful for self-serve (source
+  // "composio_catalog"/"user_custom") servers — sysadmin-managed ones aren't
+  // customer-configurable, so this silently no-ops for those rather than erroring, since
+  // the client has no way to tell the two kinds apart from the Connected list alone.
+  app.put("/api/connectors/:mcpServerId/agents", async (req, res) => {
+    if (!req.isAuthenticated() || !req.user) {
+      return res.status(401).json({ message: "Not authenticated" });
+    }
+    try {
+      const { agentCatalogIds } = z.object({ agentCatalogIds: z.array(z.string()) }).parse(req.body);
+      const server = await storage.getMcpServer(req.params.mcpServerId);
       if (!server) return res.status(404).json({ message: "MCP server not found" });
-      await storage.upsertUserMcpCredential(req.user.id, mcpServerId, encryptSecret(apiKey));
+      if (server.source === "sysadmin") return res.json({ ok: true });
+      await storage.setUserMcpAgentBindings(req.user.id, req.params.mcpServerId, agentCatalogIds);
       res.json({ ok: true });
     } catch (err: any) {
       if (err?.name === "ZodError") return res.status(400).json({ message: err.errors[0]?.message || "Invalid input" });
-      res.status(400).json({ message: err.message || "Invalid request" });
+      res.status(500).json({ message: err.message || "Failed to save agent selection" });
     }
   });
 
   // DELETE /api/mcp/connect/:mcpServerId — disconnect (removes the stored key). For
   // OAuth-style servers this also deletes+revokes the connection at Composio — otherwise
-  // it's still ACTIVE there, and the self-heal in GET /api/mcp/available would just
-  // recreate our local row on the very next poll, making "Disconnect" a no-op.
+  // it's still ACTIVE there, and the self-heal in GET /api/connectors/catalog/:slug/status
+  // would just recreate our local row the next time it's polled, making "Disconnect" a no-op.
   app.delete("/api/mcp/connect/:mcpServerId", async (req, res) => {
     if (!req.isAuthenticated() || !req.user) {
       return res.status(401).json({ message: "Not authenticated" });

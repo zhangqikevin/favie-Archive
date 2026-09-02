@@ -1893,115 +1893,6 @@ function ChannelBindingsPanel({ agentId }: { agentId: string }) {
   );
 }
 
-// ─── MCP Connect Panel ──────────────────────────────────────────────────────────
-// Lets the customer supply their own key for an MCP tool this agent offers.
-// The key is sent once and encrypted server-side — Favie's proxy injects it into
-// requests to the real (authenticated) MCP server; we never store it in plaintext.
-
-interface McpServerAvailable {
-  id: string;
-  key: string;
-  name: string;
-  description: string | null;
-  connected: boolean;
-}
-
-function McpConnectPanel() {
-  const { t } = useTranslation();
-  const queryClient = useQueryClient();
-  const [connectingId, setConnectingId] = useState<string | null>(null);
-  const [apiKey, setApiKey] = useState("");
-
-  const { data, isLoading } = useQuery<{ mcpServers: McpServerAvailable[] }>({
-    queryKey: ["/api/mcp/available"],
-  });
-  const servers = data?.mcpServers ?? [];
-
-  const connectMutation = useMutation({
-    mutationFn: (mcpServerId: string) => apiRequest("POST", "/api/mcp/connect", { mcpServerId, apiKey }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/mcp/available"] });
-      setConnectingId(null);
-      setApiKey("");
-    },
-  });
-  const disconnectMutation = useMutation({
-    mutationFn: (mcpServerId: string) => apiRequest("DELETE", `/api/mcp/connect/${mcpServerId}`),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["/api/mcp/available"] }),
-  });
-
-  if (!isLoading && servers.length === 0) return null;
-
-  return (
-    <div className="px-4 py-3 border-t border-border">
-      <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-3">{t("connectors_page.mcp_panel_title")}</p>
-      {isLoading ? (
-        <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />
-      ) : (
-        <div className="space-y-2">
-          {servers.map((s) => {
-            const isConnecting = connectingId === s.id;
-            return (
-              <div key={s.id} className="rounded-lg border border-border bg-background overflow-hidden">
-                <div className="flex items-center gap-2.5 px-3 py-2.5">
-                  <Link2 className="w-4 h-4 flex-shrink-0 text-muted-foreground" />
-                  <span className="text-sm font-medium text-foreground flex-1">{s.name}</span>
-                  {s.connected ? (
-                    <span className="text-xs font-medium text-green-600 bg-green-50 px-1.5 py-0.5 rounded">{t("connectors_page.status_connected")}</span>
-                  ) : (
-                    <button
-                      onClick={() => { setConnectingId(isConnecting ? null : s.id); setApiKey(""); }}
-                      className="text-xs text-primary hover:underline"
-                    >
-                      {isConnecting ? t("mcps_page.cancel") : t("connectors_page.button_connect")}
-                    </button>
-                  )}
-                </div>
-                {s.description && (
-                  <p className="px-3 pb-2 text-xs text-muted-foreground">{s.description}</p>
-                )}
-                {s.connected && (
-                  <div className="px-3 pb-2.5 flex justify-end">
-                    <button
-                      onClick={() => disconnectMutation.mutate(s.id)}
-                      disabled={disconnectMutation.isPending}
-                      className="text-xs text-destructive hover:underline"
-                    >
-                      {disconnectMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : t("connectors_page.button_disconnect")}
-                    </button>
-                  </div>
-                )}
-                {isConnecting && !s.connected && (
-                  <div className="px-3 pb-3 space-y-2 border-t border-border pt-2.5">
-                    <Input
-                      type="password"
-                      value={apiKey}
-                      onChange={(e) => setApiKey(e.target.value)}
-                      placeholder={t("connectors_page.paste_key_placeholder")}
-                      className="text-xs font-mono h-7"
-                    />
-                    <Button
-                      size="sm"
-                      className="w-full h-7 text-xs"
-                      disabled={connectMutation.isPending || !apiKey.trim()}
-                      onClick={() => connectMutation.mutate(s.id)}
-                    >
-                      {connectMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <><Link2 className="w-3 h-3 mr-1" />{t("connectors_page.button_connect")}</>}
-                    </Button>
-                    {connectMutation.isError && (
-                      <p className="text-xs text-destructive mt-1">{(connectMutation.error as Error)?.message || t("connectors_page.connect_failed")}</p>
-                    )}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      )}
-    </div>
-  );
-}
-
 // ─── Context Panel ────────────────────────────────────────────────────────────
 
 function AgentContextPanel({ config, agentId, restaurant }: { config: AgentConfig; agentId: string; restaurant?: Restaurant | null }) {
@@ -2061,7 +1952,6 @@ function AgentContextPanel({ config, agentId, restaurant }: { config: AgentConfi
         <p className="text-sm text-muted-foreground italic">{t("agents_page.context_nothing_scheduled")}</p>
       </div>
       <ChannelBindingsPanel agentId={agentId} />
-      <McpConnectPanel />
     </div>
   );
 }

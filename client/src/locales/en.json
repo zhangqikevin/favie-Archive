@@ -815,6 +815,7 @@
     "status_pending": "Connecting…",
     "button_connect": "Connect",
     "button_disconnect": "Disconnect",
+    "available_to_agents": "Available to these agents",
     "button_opening": "Opening…",
     "paste_key_placeholder": "Paste your API key",
     "paste_key_connect": "Connect",

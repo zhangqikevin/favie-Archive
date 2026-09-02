@@ -815,6 +815,7 @@
     "status_pending": "連接中…",
     "button_connect": "連接",
     "button_disconnect": "中斷連接",
+    "available_to_agents": "對以下 Agent 開放",
     "button_opening": "開啟中…",
     "paste_key_placeholder": "貼上你的 API key",
     "paste_key_connect": "連接",

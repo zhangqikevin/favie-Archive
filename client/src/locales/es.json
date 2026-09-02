@@ -815,6 +815,7 @@
     "status_pending": "Conectando…",
     "button_connect": "Conectar",
     "button_disconnect": "Desconectar",
+    "available_to_agents": "Disponible para estos agentes",
     "button_opening": "Abriendo…",
     "paste_key_placeholder": "Pega tu clave de API",
     "paste_key_connect": "Conectar",
