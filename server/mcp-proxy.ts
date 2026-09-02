@@ -17,6 +17,12 @@ const HOP_BY_HOP_RESPONSE_HEADERS = new Set([
   "content-encoding", "content-length", "transfer-encoding", "connection",
 ]);
 
+// MCP tool calls are request/response, not long-lived streams — a target that
+// hangs (wrong URL, dead backend, auth handshake stall) previously blocked the
+// whole chat turn until ITS OWN ~2-minute timeout gave up. Fail fast instead
+// so the agent gets an error result back quickly and can tell the user.
+const UPSTREAM_TIMEOUT_MS = 20_000;
+
 export function registerMcpProxyRoutes(app: Express) {
   app.all("/mcp/:token", async (req: Request, res: ExpressResponse) => {
     const cred = await storage.getUserMcpCredentialByToken(String(req.params.token));
@@ -60,15 +66,25 @@ export function registerMcpProxyRoutes(app: Express) {
       if (body) headers.set("content-type", "application/json");
     }
 
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), UPSTREAM_TIMEOUT_MS);
+
     let upstream: globalThis.Response;
     try {
       upstream = await fetch(targetUrl, {
         method: req.method,
         headers,
         body,
+        signal: ctl.signal,
       });
     } catch (err: any) {
-      res.status(502).json({ error: `mcp upstream fetch failed: ${err?.message ?? err}` });
+      clearTimeout(timer);
+      const timedOut = err?.name === "AbortError";
+      res.status(504).json({
+        error: timedOut
+          ? `mcp upstream timed out after ${UPSTREAM_TIMEOUT_MS}ms`
+          : `mcp upstream fetch failed: ${err?.message ?? err}`,
+      });
       return;
     }
 
@@ -78,6 +94,7 @@ export function registerMcpProxyRoutes(app: Express) {
     });
 
     if (!upstream.body) {
+      clearTimeout(timer);
       res.end();
       return;
     }
@@ -86,9 +103,14 @@ export function registerMcpProxyRoutes(app: Express) {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
+        timer.refresh(); // reset the idle window on each chunk — only a truly stalled body aborts
         res.write(value);
       }
+    } catch {
+      // Headers are already committed at this point; just end the response —
+      // there's no status code left to change.
     } finally {
+      clearTimeout(timer);
       res.end();
     }
   });

@@ -29,6 +29,16 @@ export interface ChatResult {
   steps: ChatToolStep[];
 }
 
+// Live progress events, one per ZooWork stream event that's worth showing —
+// lets /api/agent/chat forward each as an SSE frame the moment it happens,
+// instead of the client waiting for the whole turn before seeing anything.
+export type ChatStreamEvent =
+  | { type: "text"; delta: string }
+  | { type: "tool-start"; toolCallId: string; toolName: string; args?: Record<string, unknown> }
+  | { type: "tool-end"; toolCallId: string; isError?: boolean; resultPreview?: string };
+
+export type ChatStreamCallback = (event: ChatStreamEvent) => void;
+
 export class NotEntitledError extends Error {
   constructor(slot: string) {
     super(`Not entitled to agent "${slot}"`);
@@ -36,7 +46,10 @@ export class NotEntitledError extends Error {
   }
 }
 
-// key: `${userId}:${slot}` -> ZooWork session id
+// key: `${userId}:${slot}` -> ZooWork session id. In-memory cache only — the source of
+// truth is user_agent_instances (zoowork_session_id / stream_cursor), so a process
+// restart falls back to the DB instead of silently starting a brand-new, context-free
+// session (this previously made the agent "forget" everything across a restart).
 const sessions = new Map<string, string>();
 // key: `${userId}:${slot}` -> last-seen stream cursor for that session. streamEvents()
 // replays a session's *entire* persistent event log from the start when called with no
@@ -49,10 +62,11 @@ export async function chatWithAgentSlot(
   userId: string,
   slot: string,
   userMessage: string,
+  onEvent?: ChatStreamCallback,
 ): Promise<ChatResult> {
   const catalogEntry = await getEntitledEntry(userId, slot);
   if (!catalogEntry) throw new NotEntitledError(slot);
-  return chatWithCatalogEntry(userId, slot, catalogEntry, userMessage);
+  return chatWithCatalogEntry(userId, slot, catalogEntry, userMessage, onEvent);
 }
 
 /**
@@ -76,11 +90,13 @@ async function chatWithCatalogEntry(
   sessionSlot: string,
   catalogEntry: AgentCatalogEntry,
   userMessage: string,
+  onEvent?: ChatStreamCallback,
 ): Promise<ChatResult> {
   const agentId = await syncUserAgentToZoowork(userId, catalogEntry);
 
   const key = `${userId}:${sessionSlot}`;
-  let sessionId = sessions.get(key);
+  const persisted = await storage.getUserAgentInstance(userId, catalogEntry.id);
+  let sessionId = sessions.get(key) ?? persisted?.zooworkSessionId ?? undefined;
 
   if (!sessionId) {
     const session = await zc.createSession(agentId, {
@@ -88,15 +104,19 @@ async function chatWithCatalogEntry(
     });
     sessionId = session.session_id;
     sessions.set(key, sessionId);
+    cursors.delete(key);
+    await storage.setUserAgentSession(userId, catalogEntry.id, sessionId);
   } else {
+    sessions.set(key, sessionId);
     await zc.postEvents(agentId, sessionId, [{ type: "user.message", content: userMessage }]);
   }
 
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), CHAT_TIMEOUT_MS);
-  let cursor = cursors.get(key);
+  let cursor = cursors.get(key) ?? persisted?.streamCursor ?? undefined;
   try {
     let text = "";
+    let finished = false;
     // toolCallId -> in-progress step; 'start' seeds it (toolName, args), 'end'
     // fills in the outcome. Order of completion (not of the 'start' events) is
     // what the UI sees, which matches how Claude Code lists finished calls.
@@ -104,22 +124,40 @@ async function chatWithCatalogEntry(
     const stepOrder: string[] = [];
     for await (const ev of zc.streamEvents(agentId, sessionId, cursor ? { cursor, signal: ctl.signal } : { signal: ctl.signal })) {
       cursor = ev.cursor ?? cursor;
-      text += assistantText(ev);
+      const delta = assistantText(ev);
+      if (delta) {
+        text += delta;
+        onEvent?.({ type: "text", delta });
+      }
       const call = toolCall(ev);
       if (call) {
         if (call.phase === "start") {
           stepsById.set(call.toolCallId, { toolName: call.toolName, args: call.args });
           stepOrder.push(call.toolCallId);
+          onEvent?.({ type: "tool-start", toolCallId: call.toolCallId, toolName: call.toolName, args: call.args });
         } else if (call.phase === "end") {
           const existing = stepsById.get(call.toolCallId) ?? { toolName: call.toolName };
           stepsById.set(call.toolCallId, { ...existing, isError: call.isError, resultPreview: call.resultPreview });
+          onEvent?.({ type: "tool-end", toolCallId: call.toolCallId, isError: call.isError, resultPreview: call.resultPreview });
         }
       }
       if (isRunFinished(ev)) {
         const outcome = runOutcome(ev);
         if (outcome !== "succeeded") throw new Error(`zoowork run ${outcome}`);
+        finished = true;
         break;
       }
+    }
+    // The abort signal (idle/total timeout) can end the async generator
+    // without throwing — it just stops yielding, so the for-await falls
+    // through here instead of hitting `break` above. Treat that the same as
+    // any other failure instead of silently "succeeding" with whatever
+    // partial text happened to accumulate (previously this saved an empty
+    // assistant message to history when a tool call hung past the timeout).
+    if (!finished) {
+      throw ctl.signal.aborted
+        ? new Error(`zoowork chat timed out after ${CHAT_TIMEOUT_MS}ms`)
+        : new Error("zoowork stream ended before run finished");
     }
     const steps = stepOrder.map((id) => stepsById.get(id)!).filter(Boolean);
     return { text, steps };
@@ -129,7 +167,10 @@ async function chatWithCatalogEntry(
     }
     throw err;
   } finally {
-    if (cursor) cursors.set(key, cursor);
+    if (cursor) {
+      cursors.set(key, cursor);
+      await storage.setUserAgentCursor(userId, catalogEntry.id, cursor).catch(() => {});
+    }
     clearTimeout(timer);
   }
 }

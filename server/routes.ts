@@ -24,7 +24,7 @@ import { registerAdminRoutes } from "./admin-routes";
 import { registerMcpProxyRoutes } from "./mcp-proxy";
 import { ensurePreviewUser, ensureFavieDataMcpServer } from "./zoowork-admin";
 import { encryptSecret, decryptSecret } from "./crypto";
-import { startComposioConnection, findComposioConnection } from "./composio-client";
+import { startComposioConnection, findComposioConnection, deleteComposioConnection } from "./composio-client";
 import { getLogs } from "./log-buffer";
 import * as zwChannels from "./zoowork-channels";
 import { ChannelApiError } from "./zoowork-channels";
@@ -420,10 +420,17 @@ export async function registerRoutes(
     }
   });
 
-  // POST /api/agent/chat — proxy to LiteLLM (Claude) with agent context
+  // POST /api/agent/chat — streams the turn back as SSE (text deltas + tool
+  // start/end) so the chat UI can render progressively, Claude-Code style,
+  // instead of waiting for the whole run before showing anything. Validation
+  // and auth are checked BEFORE the response is committed to SSE, so those
+  // still fail as plain JSON with a normal status code; everything that goes
+  // wrong once streaming has started (including "not entitled") surfaces as
+  // an SSE `error` frame instead, since the HTTP status is already sent.
   app.post("/api/agent/chat", async (req, res) => {
+    let parsed: { agentId: string; messages: { role: "user" | "assistant"; content: string }[] };
     try {
-      const { agentId, messages } = z
+      parsed = z
         .object({
           agentId: z.string().min(1).max(50),
           messages: z
@@ -436,34 +443,44 @@ export async function registerRoutes(
             .min(1),
         })
         .parse(req.body);
+    } catch (err: any) {
+      return res.status(400).json({ message: err.errors?.[0]?.message || "Invalid request" });
+    }
+    if (!req.isAuthenticated() || !req.user) {
+      return res.status(401).json({ message: "Not authenticated" });
+    }
 
-      if (!req.isAuthenticated() || !req.user) {
-        return res.status(401).json({ message: "Not authenticated" });
-      }
-      const userId = req.user.id;
-      const lastMsg = messages.at(-1);
-      console.log("[chat-api] /api/agent/chat", JSON.stringify({
-        userTail: userId.slice(-8),
-        agentId,
-        msgCount: messages.length,
-        lastRole: lastMsg?.role,
-        lastPreview: lastMsg?.content?.slice(0, 200) ?? "",
-      }));
+    const { agentId, messages } = parsed;
+    const userId = req.user.id;
+    const lastMsg = messages.at(-1);
+    console.log("[chat-api] /api/agent/chat", JSON.stringify({
+      userTail: userId.slice(-8),
+      agentId,
+      msgCount: messages.length,
+      lastRole: lastMsg?.role,
+      lastPreview: lastMsg?.content?.slice(0, 200) ?? "",
+    }));
+
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    });
+    const send = (data: unknown) => res.write(`data: ${JSON.stringify(data)}\n\n`);
+
+    try {
       // Each agent tab is synced to its own ZooWork agent instance, gated by the
       // user's subscription (see server/zoowork-agent.ts, server/agent-entitlements.ts).
-      const { text, steps } = await chatWithAgentSlot(userId, agentId, lastMsg!.content);
-      res.json({ text, steps });
+      const { text, steps } = await chatWithAgentSlot(userId, agentId, lastMsg!.content, send);
+      send({ type: "done", text, steps });
     } catch (err: any) {
-      if (err?.name === "ZodError") {
-        return res
-          .status(400)
-          .json({ message: err.errors[0]?.message || "Invalid request" });
+      const message = err instanceof NotEntitledError ? err.message : (err?.message || "Internal server error");
+      if (!(err instanceof NotEntitledError)) {
+        console.error("[chat-api] error:", err?.stack ?? err?.message ?? JSON.stringify(err));
       }
-      if (err instanceof NotEntitledError) {
-        return res.status(403).json({ message: err.message });
-      }
-      console.error("[chat-api] error:", err?.stack ?? err?.message ?? JSON.stringify(err));
-      res.status(500).json({ message: err.message || "Internal server error" });
+      send({ type: "error", message });
+    } finally {
+      res.end();
     }
   });
 
@@ -649,10 +666,23 @@ export async function registerRoutes(
     }
   });
 
-  // DELETE /api/mcp/connect/:mcpServerId — disconnect (removes the stored key).
+  // DELETE /api/mcp/connect/:mcpServerId — disconnect (removes the stored key). For
+  // OAuth-style servers this also deletes+revokes the connection at Composio — otherwise
+  // it's still ACTIVE there, and the self-heal in GET /api/mcp/available would just
+  // recreate our local row on the very next poll, making "Disconnect" a no-op.
   app.delete("/api/mcp/connect/:mcpServerId", async (req, res) => {
     if (!req.isAuthenticated() || !req.user) {
       return res.status(401).json({ message: "Not authenticated" });
+    }
+    const server = await storage.getMcpServer(req.params.mcpServerId);
+    if (server?.authStyle === "query_param_shared_key" && server.oauthConfigId && server.encryptedAdminKey) {
+      try {
+        const adminKey = decryptSecret(server.encryptedAdminKey);
+        const remote = await findComposioConnection(adminKey, server.oauthConfigId, req.user.id);
+        if (remote) await deleteComposioConnection(adminKey, remote.id);
+      } catch (err: any) {
+        console.error("[mcp] failed to delete Composio connection on disconnect:", err.message);
+      }
     }
     await storage.deleteUserMcpCredential(req.user.id, req.params.mcpServerId);
     res.json({ ok: true });

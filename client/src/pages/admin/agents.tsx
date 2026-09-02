@@ -2539,6 +2539,13 @@ export default function AgentChatPage() {
           text: h.text,
           ts: h.ts,
         }));
+        // Tool steps are never persisted to chat_messages, so re-attach the ones
+        // we already have in memory for the turn that was just saved — otherwise
+        // this history reload wipes them out the instant they appear.
+        if (aiMsg.steps && aiMsg.steps.length > 0) {
+          const last = savedMsgs[savedMsgs.length - 1];
+          if (last?.role === "ai") last.steps = aiMsg.steps;
+        }
         const startsWithAiGreeting = savedMsgs[0]?.role === "ai";
         setMessages(startsWithAiGreeting ? savedMsgs : [...initMsgs, ...savedMsgs]);
         setHasMoreHistory(data.hasMore);
@@ -2636,17 +2643,29 @@ export default function AgentChatPage() {
     }));
   };
 
-  // Calls the agent endpoint with up to 3 attempts. Network/proxy disconnects
-  // on long-running LLM responses are common, so we retry transparently while
-  // the typing indicator stays visible — the user only sees an error after all
-  // attempts fail. 4xx responses (auth, validation, disabled) are NOT retried.
-  const callKimi = async (userText: string, history: { role: "user" | "assistant"; content: string }[]) => {
+  // Calls the agent endpoint with up to 3 attempts, consuming the SSE stream
+  // (text deltas + tool start/end) so `onUpdate` can render progressively —
+  // Claude Code style — instead of the whole turn appearing at once. Network/
+  // proxy disconnects on long-running LLM responses are common, so we retry
+  // transparently while the typing indicator stays visible; a retry resets
+  // the partial text/steps rendered by the failed attempt. 4xx responses
+  // (auth, validation) still arrive as plain JSON before streaming starts and
+  // are NOT retried; failures once streaming has begun arrive as an SSE
+  // `error` frame instead (see server/routes.ts) and ARE retried.
+  const callKimi = async (
+    userText: string,
+    history: { role: "user" | "assistant"; content: string }[],
+    onUpdate: (state: { text: string; steps: ToolStep[] }) => void,
+  ) => {
     const body = JSON.stringify({
       agentId,
       messages: [...history, { role: "user", content: userText }],
     });
     let lastErr: unknown = new Error("Network error");
     for (let attempt = 0; attempt < 3; attempt++) {
+      let text = "";
+      const steps: ToolStep[] = [];
+      const stepIndexByCallId = new Map<string, number>();
       try {
         const res = await fetch("/api/agent/chat", {
           method: "POST",
@@ -2659,9 +2678,46 @@ export default function AgentChatPage() {
           // Definite client errors → don't retry, fail fast.
           if (res.status >= 400 && res.status < 500) throw error;
           lastErr = error;
+        } else if (!res.body) {
+          lastErr = new Error("No response stream");
         } else {
-          const data = await res.json() as { text: string; steps?: ToolStep[] };
-          return { text: data.text, steps: data.steps ?? [] };
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
+          let done: { text: string; steps: ToolStep[] } | null = null;
+          let streamErr: string | null = null;
+          while (true) {
+            const { done: readerDone, value } = await reader.read();
+            if (readerDone) break;
+            buffer += decoder.decode(value, { stream: true });
+            let idx: number;
+            while ((idx = buffer.indexOf("\n\n")) !== -1) {
+              const chunk = buffer.slice(0, idx);
+              buffer = buffer.slice(idx + 2);
+              if (!chunk.startsWith("data: ")) continue;
+              const event = JSON.parse(chunk.slice(6));
+              if (event.type === "text") {
+                text += event.delta;
+                onUpdate({ text, steps: [...steps] });
+              } else if (event.type === "tool-start") {
+                steps.push({ toolName: event.toolName, args: event.args });
+                stepIndexByCallId.set(event.toolCallId, steps.length - 1);
+                onUpdate({ text, steps: [...steps] });
+              } else if (event.type === "tool-end") {
+                const i = stepIndexByCallId.get(event.toolCallId);
+                if (i !== undefined) steps[i] = { ...steps[i], isError: event.isError, resultPreview: event.resultPreview };
+                onUpdate({ text, steps: [...steps] });
+              } else if (event.type === "done") {
+                done = { text: event.text, steps: event.steps ?? steps };
+              } else if (event.type === "error") {
+                streamErr = event.message || "API error";
+              }
+            }
+            if (done || streamErr) break;
+          }
+          if (done) return done;
+          if (streamErr && /401|403|400|disabled|Not authenticated/i.test(streamErr)) throw new Error(streamErr);
+          lastErr = new Error(streamErr || "Stream ended unexpectedly");
         }
       } catch (e: any) {
         // Re-throw 4xx without retrying.
@@ -2681,16 +2737,27 @@ export default function AgentChatPage() {
     setMessages((m) => [...m, userMsg]);
     setInput("");
     setIsLoading(true);
+    const aiMsgId = makeId();
+    let started = false;
+    const onUpdate = (state: { text: string; steps: ToolStep[] }) => {
+      if (!started) {
+        started = true;
+        setIsLoading(false);
+        setMessages((m) => [...m, { id: aiMsgId, role: "ai", text: state.text, content: chip.response.content, ts: nowStr(), steps: state.steps }]);
+      } else {
+        setMessages((m) => m.map((msg) => (msg.id === aiMsgId ? { ...msg, text: state.text, steps: state.steps } : msg)));
+      }
+    };
     try {
       const history = buildHistory(messages);
-      const { text: aiText, steps } = await callKimi(chip.label, history);
-      const aiMsg: ChatMsg = { id: makeId(), role: "ai", text: aiText, content: chip.response.content, ts: nowStr(), steps };
-      setMessages((m) => [...m, aiMsg]);
+      const { text: aiText, steps } = await callKimi(chip.label, history, onUpdate);
+      const aiMsg: ChatMsg = { id: aiMsgId, role: "ai", text: aiText, content: chip.response.content, ts: nowStr(), steps };
+      setMessages((m) => (started ? m.map((msg) => (msg.id === aiMsgId ? aiMsg : msg)) : [...m, aiMsg]));
       saveMessages(userMsg, aiMsg);
     } catch {
       const fallback = chip.response.text || t("agents_page.chat_error_fallback");
       const aiMsg: ChatMsg = { id: makeId(), role: "ai", text: fallback, content: chip.response.content, ts: nowStr() };
-      setMessages((m) => [...m, aiMsg]);
+      setMessages((m) => [...m.filter((msg) => msg.id !== aiMsgId), aiMsg]);
       saveMessages(userMsg, aiMsg);
     } finally {
       setIsLoading(false);
@@ -2704,21 +2771,32 @@ export default function AgentChatPage() {
     setMessages((m) => [...m, userMsg]);
     setInput("");
     setIsLoading(true);
+    const aiMsgId = makeId();
+    let started = false;
+    const onUpdate = (state: { text: string; steps: ToolStep[] }) => {
+      if (!started) {
+        started = true;
+        setIsLoading(false);
+        setMessages((m) => [...m, { id: aiMsgId, role: "ai", text: state.text, ts: nowStr(), steps: state.steps }]);
+      } else {
+        setMessages((m) => m.map((msg) => (msg.id === aiMsgId ? { ...msg, text: state.text, steps: state.steps } : msg)));
+      }
+    };
     try {
       const history = buildHistory(messages);
       const taskId = pendingTaskId.current;
       const taskContext = taskId ? (AGENT_TASK_CONTEXTS[agentId]?.[taskId] ?? null) : null;
       if (taskId) pendingTaskId.current = null;
       const llmText = taskContext ? `${taskContext}\n\nUser's data: ${text}` : text;
-      const { text: aiText, steps } = await callKimi(llmText, history);
-      const aiMsg: ChatMsg = { id: makeId(), role: "ai", text: aiText, ts: nowStr(), steps };
-      setMessages((m) => [...m, aiMsg]);
+      const { text: aiText, steps } = await callKimi(llmText, history, onUpdate);
+      const aiMsg: ChatMsg = { id: aiMsgId, role: "ai", text: aiText, ts: nowStr(), steps };
+      setMessages((m) => (started ? m.map((msg) => (msg.id === aiMsgId ? aiMsg : msg)) : [...m, aiMsg]));
       saveMessages(userMsg, aiMsg);
     } catch {
       // After 3 retries already exhausted in callKimi — only now surface a fallback.
       // We do NOT persist this error message to history.
       const aiMsg: ChatMsg = { id: makeId(), role: "ai", text: t("agents_page.chat_error_fallback"), ts: nowStr() };
-      setMessages((m) => [...m, aiMsg]);
+      setMessages((m) => [...m.filter((msg) => msg.id !== aiMsgId), aiMsg]);
     } finally {
       setIsLoading(false);
     }

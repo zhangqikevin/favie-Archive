@@ -84,6 +84,8 @@ export interface IStorage {
 
   getUserAgentInstance(userId: string, agentCatalogId: string): Promise<UserAgentInstance | undefined>;
   upsertUserAgentInstanceSync(userId: string, agentCatalogId: string, zooworkAgentId: string, syncedHash: string): Promise<void>;
+  setUserAgentSession(userId: string, agentCatalogId: string, zooworkSessionId: string): Promise<void>;
+  setUserAgentCursor(userId: string, agentCatalogId: string, streamCursor: string): Promise<void>;
 
   listMcpServers(): Promise<McpServer[]>;
   getMcpServer(id: string): Promise<McpServer | undefined>;
@@ -507,6 +509,20 @@ export class DatabaseStorage implements IStorage {
       return;
     }
     await db.insert(userAgentInstances).values({ userId, agentCatalogId, zooworkAgentId, syncedHash });
+  }
+
+  async setUserAgentSession(userId: string, agentCatalogId: string, zooworkSessionId: string): Promise<void> {
+    await db
+      .update(userAgentInstances)
+      .set({ zooworkSessionId, streamCursor: null, updatedAt: new Date() })
+      .where(and(eq(userAgentInstances.userId, userId), eq(userAgentInstances.agentCatalogId, agentCatalogId)));
+  }
+
+  async setUserAgentCursor(userId: string, agentCatalogId: string, streamCursor: string): Promise<void> {
+    await db
+      .update(userAgentInstances)
+      .set({ streamCursor, updatedAt: new Date() })
+      .where(and(eq(userAgentInstances.userId, userId), eq(userAgentInstances.agentCatalogId, agentCatalogId)));
   }
 
   async listMcpServers(): Promise<McpServer[]> {

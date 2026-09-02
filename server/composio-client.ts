@@ -12,11 +12,11 @@ async function composioFetch(apiKey: string, path: string, init?: RequestInit) {
     ...init,
     headers: { "x-api-key": apiKey, "content-type": "application/json", ...init?.headers },
   });
+  const raw = await res.text();
   if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`Composio API ${path} failed: ${res.status} ${body}`);
+    throw new Error(`Composio API ${path} failed: ${res.status} ${raw}`);
   }
-  return res.json();
+  return raw ? JSON.parse(raw) : undefined;
 }
 
 export interface ComposioLinkResult {
@@ -43,12 +43,24 @@ export async function findComposioConnection(
   apiKey: string,
   authConfigId: string,
   userId: string,
-): Promise<{ status: string } | undefined> {
+): Promise<{ id: string; status: string } | undefined> {
   const data = await composioFetch(
     apiKey,
     `/connected_accounts?user_ids=${encodeURIComponent(userId)}&auth_config_ids=${encodeURIComponent(authConfigId)}`,
   );
-  const items = (data.items ?? []) as { status: string; updated_at: string }[];
+  const items = (data.items ?? []) as { id: string; status: string; updated_at: string }[];
   if (items.length === 0) return undefined;
   return items.sort((a, b) => b.updated_at.localeCompare(a.updated_at))[0];
+}
+
+/**
+ * Deletes the connected account at Composio (and asks it to revoke the upstream OAuth
+ * grant too). Without this, "Disconnect" only removes our own local credential row —
+ * findComposioConnection would still see the same connection ACTIVE on Composio's side
+ * and the self-heal in GET /api/mcp/available would silently recreate it right away.
+ */
+export async function deleteComposioConnection(apiKey: string, connectedAccountId: string): Promise<void> {
+  await composioFetch(apiKey, `/connected_accounts/${encodeURIComponent(connectedAccountId)}?revoke_on_delete=true`, {
+    method: "DELETE",
+  });
 }

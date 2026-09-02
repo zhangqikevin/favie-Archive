@@ -14,7 +14,7 @@
 import { createHash, randomBytes } from "crypto";
 import { zc } from "./zoowork-client";
 import { storage } from "./storage";
-import type { AgentCatalogEntry } from "@shared/schema";
+import type { AgentCatalogEntry, UserMcpCredential } from "@shared/schema";
 type McpTransport = "streamable-http" | "sse";
 function asTransport(t: string): McpTransport {
   return t === "sse" ? "sse" : "streamable-http";
@@ -63,6 +63,22 @@ const MCP_CONNECT_HINT =
   "the \"Connect\" button for that service in the panel next to this chat — you cannot collect or " +
   "store API keys yourself.";
 
+/**
+ * Without this, the agent has the MCP tool FUNCTIONS available (ZooWork wires
+ * them in automatically once `mcp` is declared) but no idea they exist unless
+ * the user's request happens to make the model reach for them on its own —
+ * it won't proactively mention or offer to use a connected integration. This
+ * tells it by name what's live and how to invoke it.
+ */
+function buildConnectedIntegrationsSection(connected: { key: string; name: string; description: string | null }[]): string {
+  if (connected.length === 0) return "";
+  const lines = connected.map((s) => `- "${s.name}" — tools named mcp__${s.key}__*${s.description ? `. ${s.description}` : ""}`);
+  return (
+    "\n\nYou currently have these connected tool integrations available — use them whenever relevant " +
+    "instead of saying you can't look something up:\n" + lines.join("\n")
+  );
+}
+
 // Applied to every synced agent regardless of what sysadmin wrote for personaPrompt —
 // an empty or unset personaPrompt otherwise falls through to the platform's own default
 // self-description ("I'm an AI assistant from ZooWork..."), which leaks our vendor's name
@@ -82,7 +98,7 @@ const DEFAULT_PERSONA_PROMPT =
 // already-synced agent to re-push on its next use — configHash only reflects the catalog
 // entry's own fields, so a change to how we assemble the final prompt from those fields
 // would otherwise go unnoticed by the "has this changed since last sync" check.
-const PERSONA_TEMPLATE_VERSION = "v2-brand-guard";
+const PERSONA_TEMPLATE_VERSION = "v3-connected-integrations";
 
 function proxyUrlFor(proxyToken: string): string {
   const base = process.env.MCP_PROXY_BASE_URL;
@@ -90,8 +106,9 @@ function proxyUrlFor(proxyToken: string): string {
   return `${base.replace(/\/$/, "")}/mcp/${proxyToken}`;
 }
 
-function buildPersona(personaPrompt: string): string {
-  return (personaPrompt.trim() || DEFAULT_PERSONA_PROMPT) + BRAND_GUARD + MCP_CONNECT_HINT;
+function buildPersona(personaPrompt: string, connected: { key: string; name: string; description: string | null }[]): string {
+  return (personaPrompt.trim() || DEFAULT_PERSONA_PROMPT) + BRAND_GUARD
+    + buildConnectedIntegrationsSection(connected) + MCP_CONNECT_HINT;
 }
 
 function configHash(
@@ -115,23 +132,20 @@ export async function listOrgSkills() {
 }
 
 /**
- * Build the `mcp` declarations for one customer's agent: only servers bound to
- * this catalog entry AND that this customer has already supplied a key for.
- * Anything bound-but-not-yet-connected is simply omitted — the agent's persona
- * hint tells the model to point the user at the Connect button instead.
+ * MCP servers bound to this catalog entry that this customer has already
+ * supplied a key for, paired with their credential — the ones actually live
+ * on their agent right now. Anything bound-but-not-yet-connected is omitted;
+ * the persona's connect hint tells the model to point the user at the
+ * Connect button for those instead.
  */
-async function buildMcpDeclarations(
-  userId: string,
-  catalogId: string,
-): Promise<{ name: string; url: string; transport: McpTransport }[]> {
+async function getConnectedMcpServers(userId: string, catalogId: string) {
   const boundServers = await storage.getMcpServersForAgent(catalogId);
-  const declarations: { name: string; url: string; transport: McpTransport }[] = [];
+  const connected: { server: (typeof boundServers)[number]; credential: UserMcpCredential }[] = [];
   for (const server of boundServers) {
     const cred = await storage.getUserMcpCredential(userId, server.id);
-    if (!cred) continue;
-    declarations.push({ name: server.key, url: proxyUrlFor(cred.proxyToken), transport: asTransport(server.transport) });
+    if (cred) connected.push({ server, credential: cred });
   }
-  return declarations;
+  return connected;
 }
 
 /**
@@ -140,10 +154,15 @@ async function buildMcpDeclarations(
  * MCP connections actually changed since the last sync.
  */
 export async function syncUserAgentToZoowork(userId: string, entry: AgentCatalogEntry): Promise<string> {
-  const mcp = await buildMcpDeclarations(userId, entry.id);
+  const connected = await getConnectedMcpServers(userId, entry.id);
+  const mcp = connected.map(({ server, credential }) => ({
+    name: server.key,
+    url: proxyUrlFor(credential.proxyToken),
+    transport: asTransport(server.transport),
+  }));
   const skillIds = entry.skillIds as string[];
   const hash = configHash(entry.model, entry.personaPrompt, skillIds, mcp);
-  const persona = buildPersona(entry.personaPrompt);
+  const persona = buildPersona(entry.personaPrompt, connected.map(({ server }) => server));
 
   const existing = await storage.getUserAgentInstance(userId, entry.id);
 

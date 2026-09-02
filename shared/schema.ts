@@ -212,6 +212,12 @@ export const userAgentInstances = pgTable("user_agent_instances", {
   agentCatalogId: varchar("agent_catalog_id").notNull().references(() => agentCatalog.id, { onDelete: "cascade" }),
   zooworkAgentId: text("zoowork_agent_id"),
   syncedHash: text("synced_hash"), // hash of (model, personaPrompt, skillIds, mcp config) last pushed
+  // Persisted so a server restart doesn't orphan the user's conversation — the session's
+  // full event log lives on ZooWork, but only reachable by session_id, and streamEvents()
+  // replays that whole log from the top without a cursor. Losing either in memory (e.g. a
+  // process restart) previously made the agent start a brand-new, context-free session.
+  zooworkSessionId: text("zoowork_session_id"),
+  streamCursor: text("stream_cursor"),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
 }, (t) => [
