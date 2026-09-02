@@ -63,10 +63,35 @@ const MCP_CONNECT_HINT =
   "the \"Connect\" button for that service in the panel next to this chat — you cannot collect or " +
   "store API keys yourself.";
 
+// Applied to every synced agent regardless of what sysadmin wrote for personaPrompt —
+// an empty or unset personaPrompt otherwise falls through to the platform's own default
+// self-description ("I'm an AI assistant from ZooWork..."), which leaks our vendor's name
+// to the end customer.
+const BRAND_GUARD =
+  "\n\nYou are a Favie AI assistant. Never mention \"ZooWork\" or any other underlying platform " +
+  "or vendor by name — from the user's perspective, you are simply Favie.";
+
+// Used whenever a catalog entry's own personaPrompt is blank, so a sysadmin forgetting to
+// fill one in still gets a coherent, on-brand agent instead of a generic one.
+const DEFAULT_PERSONA_PROMPT =
+  "You are Favie, a helpful AI assistant for restaurant owners and operators. Answer questions " +
+  "clearly and practically. You do not yet have access to the user's live business data or " +
+  "specialized tools unless a tool result says otherwise; say so rather than inventing numbers.";
+
+// Bump this whenever persona construction below changes in a way that should force every
+// already-synced agent to re-push on its next use — configHash only reflects the catalog
+// entry's own fields, so a change to how we assemble the final prompt from those fields
+// would otherwise go unnoticed by the "has this changed since last sync" check.
+const PERSONA_TEMPLATE_VERSION = "v2-brand-guard";
+
 function proxyUrlFor(proxyToken: string): string {
   const base = process.env.MCP_PROXY_BASE_URL;
   if (!base) throw new Error("MCP_PROXY_BASE_URL is not set");
   return `${base.replace(/\/$/, "")}/mcp/${proxyToken}`;
+}
+
+function buildPersona(personaPrompt: string): string {
+  return (personaPrompt.trim() || DEFAULT_PERSONA_PROMPT) + BRAND_GUARD + MCP_CONNECT_HINT;
 }
 
 function configHash(
@@ -77,7 +102,7 @@ function configHash(
 ): string {
   const mcpKey = mcp.map((m) => `${m.name}:${m.url}:${m.transport}`).sort().join(",");
   return createHash("sha256")
-    .update(`${model ?? ""}\n${personaPrompt}\n${[...skillIds].sort().join(",")}\n${mcpKey}`)
+    .update(`${PERSONA_TEMPLATE_VERSION}\n${model ?? ""}\n${personaPrompt}\n${[...skillIds].sort().join(",")}\n${mcpKey}`)
     .digest("hex");
 }
 
@@ -118,7 +143,7 @@ export async function syncUserAgentToZoowork(userId: string, entry: AgentCatalog
   const mcp = await buildMcpDeclarations(userId, entry.id);
   const skillIds = entry.skillIds as string[];
   const hash = configHash(entry.model, entry.personaPrompt, skillIds, mcp);
-  const persona = entry.personaPrompt + MCP_CONNECT_HINT;
+  const persona = buildPersona(entry.personaPrompt);
 
   const existing = await storage.getUserAgentInstance(userId, entry.id);
 
