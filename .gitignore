@@ -10,3 +10,4 @@ node_modules
 openclaw.json
 .gstack/
 .whatsapp-auth/
+/uploads/

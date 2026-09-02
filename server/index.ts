@@ -160,6 +160,9 @@ console.log("🚀 UberEats routes registered");
 
 app.use(
   express.json({
+    // Default 100kb is too small for a base64-encoded chat image upload (~33% larger
+    // than raw bytes); 12mb comfortably covers uploads.ts's 8MB raw-image cap.
+    limit: "12mb",
     verify: (req, _res, buf) => {
       req.rawBody = buf;
     },

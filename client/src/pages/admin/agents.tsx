@@ -36,7 +36,7 @@ import {
   Bell, ShieldAlert, BarChart2, ListChecks, RefreshCw, MessageSquare,
   CreditCard, Lock, Loader2, PenLine, AlertTriangle, ClipboardList,
   GraduationCap, Building2, BarChart3, Tag, CalendarDays, Users, Video, Trash2,
-  Link2, X, ChevronDown, ChevronUp,
+  Link2, X, ChevronDown, ChevronUp, Paperclip,
 } from "lucide-react";
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -71,6 +71,7 @@ interface ChatMsg {
   content?: React.ReactNode;
   ts: string;
   steps?: ToolStep[];
+  attachmentUrl?: string;
 }
 
 interface ChipDef {
@@ -2364,6 +2365,10 @@ export default function AgentChatPage() {
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+  const [pendingUpload, setPendingUpload] = useState<{ url: string } | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const pendingTaskId = useRef<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const chatContainerRef = useRef<HTMLDivElement>(null);
@@ -2540,12 +2545,17 @@ export default function AgentChatPage() {
           text: h.text,
           ts: h.ts,
         }));
-        // Tool steps are never persisted to chat_messages, so re-attach the ones
-        // we already have in memory for the turn that was just saved — otherwise
-        // this history reload wipes them out the instant they appear.
+        // Tool steps and the user's own uploaded-image URL are never persisted to
+        // chat_messages, so re-attach what we already have in memory for the turn
+        // that was just saved — otherwise this history reload wipes them out the
+        // instant they appear.
         if (aiMsg.steps && aiMsg.steps.length > 0) {
           const last = savedMsgs[savedMsgs.length - 1];
           if (last?.role === "ai") last.steps = aiMsg.steps;
+        }
+        if (userMsg.attachmentUrl) {
+          const secondToLast = savedMsgs[savedMsgs.length - 2];
+          if (secondToLast?.role === "user") secondToLast.attachmentUrl = userMsg.attachmentUrl;
         }
         const startsWithAiGreeting = savedMsgs[0]?.role === "ai";
         setMessages(startsWithAiGreeting ? savedMsgs : [...initMsgs, ...savedMsgs]);
@@ -2765,12 +2775,44 @@ export default function AgentChatPage() {
     }
   };
 
+  // The agent has no way to receive file bytes directly — but it does have a built-in
+  // `image` tool that can fetch and view a plain image URL (png/jpeg/gif/webp only). We
+  // host the upload ourselves and hand the agent that URL as part of the message text.
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      setUploadError(t("agents_page.upload_not_image"));
+      return;
+    }
+    setUploadError(null);
+    setUploading(true);
+    try {
+      const dataUrl: string = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result as string);
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(file);
+      });
+      const res = await apiRequest("POST", "/api/chat/upload", { dataUrl });
+      const { url } = await res.json();
+      setPendingUpload({ url });
+    } catch (err: any) {
+      setUploadError(err?.message || t("agents_page.upload_failed"));
+    } finally {
+      setUploading(false);
+    }
+  };
+
   const handleFreeText = async () => {
     const text = input.trim();
-    if (!text || isLoading) return;
-    const userMsg: ChatMsg = { id: makeId(), role: "user", text, ts: nowStr() };
+    const attachment = pendingUpload;
+    if ((!text && !attachment) || isLoading) return;
+    const userMsg: ChatMsg = { id: makeId(), role: "user", text, ts: nowStr(), attachmentUrl: attachment?.url };
     setMessages((m) => [...m, userMsg]);
     setInput("");
+    setPendingUpload(null);
     setIsLoading(true);
     const aiMsgId = makeId();
     let started = false;
@@ -2788,7 +2830,10 @@ export default function AgentChatPage() {
       const taskId = pendingTaskId.current;
       const taskContext = taskId ? (AGENT_TASK_CONTEXTS[agentId]?.[taskId] ?? null) : null;
       if (taskId) pendingTaskId.current = null;
-      const llmText = taskContext ? `${taskContext}\n\nUser's data: ${text}` : text;
+      const withTask = taskContext ? `${taskContext}\n\nUser's data: ${text}` : text;
+      const llmText = attachment
+        ? `${withTask}\n\n[User attached an image. Use the image tool to view it: ${attachment.url}]`
+        : withTask;
       const { text: aiText, steps } = await callKimi(llmText, history, onUpdate);
       const aiMsg: ChatMsg = { id: aiMsgId, role: "ai", text: aiText, ts: nowStr(), steps };
       setMessages((m) => (started ? m.map((msg) => (msg.id === aiMsgId ? aiMsg : msg)) : [...m, aiMsg]));
@@ -2972,16 +3017,26 @@ export default function AgentChatPage() {
                     {msg.role === "ai" && msg.steps && msg.steps.length > 0 && (
                       <ToolStepsBlock steps={msg.steps} />
                     )}
-                    <MessageBubble
-                      className={cn("rounded-xl px-4 py-3 text-sm leading-relaxed",
-                        msg.role === "ai" ? "bg-card border border-border text-foreground" : "bg-primary text-primary-foreground")}
-                      selectMode={selectMode}
-                      selected={selectedIds.has(msg.id)}
-                      onLongPress={() => enterSelectMode(msg.id)}
-                      onToggleSelect={() => toggleSelectMessage(msg.id)}
-                    >
-                      {msg.role === "ai" ? <ChatMarkdown text={msg.text} /> : msg.text}
-                    </MessageBubble>
+                    {msg.attachmentUrl && (
+                      <img
+                        src={msg.attachmentUrl}
+                        alt=""
+                        className={cn("max-w-[220px] rounded-xl mb-1.5", msg.role === "user" && "ml-auto")}
+                        data-testid={`img-attachment-${msg.id}`}
+                      />
+                    )}
+                    {msg.text && (
+                      <MessageBubble
+                        className={cn("rounded-xl px-4 py-3 text-sm leading-relaxed",
+                          msg.role === "ai" ? "bg-card border border-border text-foreground" : "bg-primary text-primary-foreground")}
+                        selectMode={selectMode}
+                        selected={selectedIds.has(msg.id)}
+                        onLongPress={() => enterSelectMode(msg.id)}
+                        onToggleSelect={() => toggleSelectMessage(msg.id)}
+                      >
+                        {msg.role === "ai" ? <ChatMarkdown text={msg.text} /> : msg.text}
+                      </MessageBubble>
+                    )}
                     {msg.content && <div>{msg.content}</div>}
                     {msg.id === "init-0" && isKnownAgentId(agentId) && (
                       <AgentIntroContent
@@ -3024,12 +3079,58 @@ export default function AgentChatPage() {
               <div className="mb-4">
                 <ChipBar chips={config.chips} onSend={handleChip} />
               </div>
+              {(pendingUpload || uploading) && (
+                <div className="flex items-center gap-2 mb-2.5 px-1">
+                  <div className="relative w-12 h-12 rounded-lg overflow-hidden border border-border bg-muted flex items-center justify-center flex-shrink-0">
+                    {uploading ? (
+                      <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />
+                    ) : (
+                      <img src={pendingUpload!.url} alt="" className="w-full h-full object-cover" />
+                    )}
+                  </div>
+                  {!uploading && (
+                    <button
+                      onClick={() => setPendingUpload(null)}
+                      className="text-xs text-muted-foreground hover:text-destructive"
+                      data-testid="button-remove-upload"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+              )}
+              {uploadError && <p className="text-xs text-destructive mb-2 px-1">{uploadError}</p>}
               <div className="flex items-center gap-2.5">
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/*"
+                  className="hidden"
+                  onChange={handleFileSelect}
+                  data-testid="input-agent-upload"
+                />
+                <UITooltip>
+                  <UITooltipTrigger asChild>
+                    <Button
+                      variant="outline"
+                      size="icon"
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={isLoading || uploading}
+                      style={{ height: '52px', width: '52px' }}
+                      className="flex-shrink-0 rounded-xl"
+                      data-testid="button-agent-attach">
+                      <Paperclip className="w-4.5 h-4.5" />
+                    </Button>
+                  </UITooltipTrigger>
+                  <UITooltipContent side="top">
+                    <span className="text-xs">{t("agents_page.upload_attach_image")}</span>
+                  </UITooltipContent>
+                </UITooltip>
                 <input type="text" value={input} onChange={(e) => setInput(e.target.value)}
                   onKeyDown={(e) => {
                     if (e.key === "Enter") {
                       e.preventDefault();
-                      if ((e.metaKey || e.altKey) && input.trim() && !isLoading) {
+                      if ((e.metaKey || e.altKey) && (input.trim() || pendingUpload) && !isLoading) {
                         handleFreeText();
                       }
                     }
@@ -3041,7 +3142,7 @@ export default function AgentChatPage() {
                   data-testid="input-agent-chat" />
                 <UITooltip>
                   <UITooltipTrigger asChild>
-                    <Button onClick={handleFreeText} disabled={!input.trim() || isLoading}
+                    <Button onClick={handleFreeText} disabled={(!input.trim() && !pendingUpload) || isLoading}
                       size="icon"
                       style={{ height: '52px', width: '52px' }}
                       className="flex-shrink-0 bg-primary text-primary-foreground rounded-xl shadow-sm active:scale-95 transition-transform"

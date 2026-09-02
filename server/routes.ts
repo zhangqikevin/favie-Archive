@@ -22,6 +22,7 @@ import { chatWithAgentSlot, chatWithCatalogKeyUnchecked, NotEntitledError } from
 import { getEntitledSlots } from "./agent-entitlements";
 import { registerAdminRoutes } from "./admin-routes";
 import { registerMcpProxyRoutes } from "./mcp-proxy";
+import { registerUploadRoutes } from "./uploads";
 import { ensurePreviewUser, ensureFavieDataMcpServer } from "./zoowork-admin";
 import { encryptSecret, decryptSecret } from "./crypto";
 import { findComposioConnection, deleteComposioConnection, listComposioToolkits } from "./composio-client";
@@ -174,6 +175,7 @@ export async function registerRoutes(
 
   registerAdminRoutes(app);
   registerMcpProxyRoutes(app);
+  registerUploadRoutes(app);
 
   // Seed the first System Admin account if none exists yet.
   storage.countAdminUsers().then(async (count) => {
