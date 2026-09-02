@@ -818,6 +818,8 @@
     "button_opening": "Opening…",
     "paste_key_placeholder": "Paste your API key",
     "paste_key_connect": "Connect",
+    "mcp_panel_title": "MCP Tools",
+    "connect_failed": "Connect failed",
     "empty": "No connectors available yet.",
     "tab_browse": "Browse",
     "tab_connected": "Connected",

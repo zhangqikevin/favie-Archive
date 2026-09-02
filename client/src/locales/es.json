@@ -818,6 +818,8 @@
     "button_opening": "Abriendo…",
     "paste_key_placeholder": "Pega tu clave de API",
     "paste_key_connect": "Conectar",
+    "mcp_panel_title": "Herramientas MCP",
+    "connect_failed": "Error al conectar",
     "empty": "Aún no hay conectores disponibles.",
     "tab_browse": "Explorar",
     "tab_connected": "Conectados",

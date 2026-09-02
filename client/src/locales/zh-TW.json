@@ -818,6 +818,8 @@
     "button_opening": "開啟中…",
     "paste_key_placeholder": "貼上你的 API key",
     "paste_key_connect": "連接",
+    "mcp_panel_title": "MCP 工具",
+    "connect_failed": "連接失敗",
     "empty": "暫時還沒有可用的連接器。",
     "tab_browse": "瀏覽",
     "tab_connected": "已連接",

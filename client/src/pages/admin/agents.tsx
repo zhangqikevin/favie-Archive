@@ -91,7 +91,7 @@ function ToolStepRow({ step }: { step: ToolStep }) {
   const [expanded, setExpanded] = useState(false);
   const hasPreview = !!step.resultPreview;
   return (
-    <div className="font-mono text-sm leading-relaxed">
+    <div className="font-mono text-xs leading-relaxed">
       <button
         type="button"
         onClick={() => hasPreview && setExpanded((v) => !v)}
@@ -1906,6 +1906,7 @@ interface McpServerAvailable {
 }
 
 function McpConnectPanel() {
+  const { t } = useTranslation();
   const queryClient = useQueryClient();
   const [connectingId, setConnectingId] = useState<string | null>(null);
   const [apiKey, setApiKey] = useState("");
@@ -1932,7 +1933,7 @@ function McpConnectPanel() {
 
   return (
     <div className="px-4 py-3 border-t border-border">
-      <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-3">MCP Tools</p>
+      <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-3">{t("connectors_page.mcp_panel_title")}</p>
       {isLoading ? (
         <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />
       ) : (
@@ -1945,13 +1946,13 @@ function McpConnectPanel() {
                   <Link2 className="w-4 h-4 flex-shrink-0 text-muted-foreground" />
                   <span className="text-sm font-medium text-foreground flex-1">{s.name}</span>
                   {s.connected ? (
-                    <span className="text-xs font-medium text-green-600 bg-green-50 px-1.5 py-0.5 rounded">Connected</span>
+                    <span className="text-xs font-medium text-green-600 bg-green-50 px-1.5 py-0.5 rounded">{t("connectors_page.status_connected")}</span>
                   ) : (
                     <button
                       onClick={() => { setConnectingId(isConnecting ? null : s.id); setApiKey(""); }}
                       className="text-xs text-primary hover:underline"
                     >
-                      {isConnecting ? "Cancel" : "Connect"}
+                      {isConnecting ? t("mcps_page.cancel") : t("connectors_page.button_connect")}
                     </button>
                   )}
                 </div>
@@ -1965,7 +1966,7 @@ function McpConnectPanel() {
                       disabled={disconnectMutation.isPending}
                       className="text-xs text-destructive hover:underline"
                     >
-                      {disconnectMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : "Disconnect"}
+                      {disconnectMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : t("connectors_page.button_disconnect")}
                     </button>
                   </div>
                 )}
@@ -1975,7 +1976,7 @@ function McpConnectPanel() {
                       type="password"
                       value={apiKey}
                       onChange={(e) => setApiKey(e.target.value)}
-                      placeholder="Paste your API key"
+                      placeholder={t("connectors_page.paste_key_placeholder")}
                       className="text-xs font-mono h-7"
                     />
                     <Button
@@ -1984,10 +1985,10 @@ function McpConnectPanel() {
                       disabled={connectMutation.isPending || !apiKey.trim()}
                       onClick={() => connectMutation.mutate(s.id)}
                     >
-                      {connectMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <><Link2 className="w-3 h-3 mr-1" />Connect</>}
+                      {connectMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <><Link2 className="w-3 h-3 mr-1" />{t("connectors_page.button_connect")}</>}
                     </Button>
                     {connectMutation.isError && (
-                      <p className="text-xs text-destructive mt-1">{(connectMutation.error as Error)?.message || "Connect failed"}</p>
+                      <p className="text-xs text-destructive mt-1">{(connectMutation.error as Error)?.message || t("connectors_page.connect_failed")}</p>
                     )}
                   </div>
                 )}
