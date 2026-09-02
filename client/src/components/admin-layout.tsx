@@ -67,7 +67,7 @@ const navSections: NavSection[] = [
   {
     items: [
       { labelKey: "admin.files",      href: "/admin/files",      icon: FolderOpen },
-      { labelKey: "admin.connectors", href: "/admin/connectors", icon: Link2 },
+      { labelKey: "admin.plugins", href: "/admin/plugins", icon: Link2 },
       { labelKey: "admin.settings",   href: "/admin/settings",   icon: Settings },
     ],
   },

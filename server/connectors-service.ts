@@ -5,6 +5,7 @@
  * mcpServers row the first time ANYONE tries to connect it — auth_config + Composio "MCP
  * server" provisioned automatically, no sysadmin step required.
  */
+import { randomUUID } from "node:crypto";
 import { storage } from "./storage";
 import { encryptSecret, decryptSecret } from "./crypto";
 import {
@@ -59,7 +60,40 @@ export async function ensureMcpServerForToolkit(
     authStyle: "query_param_shared_key",
     encryptedAdminKey: encryptSecret(apiKey),
     oauthConfigId: authConfigId,
+    source: "composio_catalog",
   });
+}
+
+/**
+ * A customer's own MCP server, added from the Plug-ins "MCPs" tab — always a brand new
+ * row (never reused across customers, unlike ensureMcpServerForToolkit's one-row-per-
+ * toolkit sharing), keyed by a random slug since the display name isn't unique.
+ */
+export async function createCustomMcpServer(
+  userId: string,
+  opts: {
+    name: string;
+    description: string | null;
+    targetUrl: string;
+    authHeaderName: string;
+    authScheme: string;
+    apiKey: string;
+  },
+): Promise<McpServer> {
+  const key = `custom-${randomUUID().replace(/-/g, "").slice(0, 20)}`;
+  const server = await storage.createMcpServer({
+    key,
+    name: opts.name,
+    description: opts.description,
+    targetUrl: opts.targetUrl,
+    transport: "streamable-http",
+    authHeaderName: opts.authHeaderName || "Authorization",
+    authScheme: opts.authScheme ?? "Bearer ",
+    authStyle: "header_secret",
+    source: "user_custom",
+  });
+  await storage.upsertUserMcpCredential(userId, server.id, encryptSecret(opts.apiKey));
+  return server;
 }
 
 /** Starts (or resumes) a hosted OAuth connection for `userId` on this toolkit. */
@@ -142,14 +176,24 @@ export interface ConnectedConnector {
   description: string | null;
 }
 
-/** Everything this user has actually connected, regardless of which agent(s) it's bound to. */
-export async function listConnectedConnectors(userId: string): Promise<ConnectedConnector[]> {
+async function listConnectedBySource(userId: string, source: string): Promise<ConnectedConnector[]> {
   const creds = await storage.listUserMcpCredentials(userId);
   if (creds.length === 0) return [];
   const servers = await storage.listMcpServers();
   const byId = new Map(servers.map((s) => [s.id, s]));
   return creds
     .map((c) => byId.get(c.mcpServerId))
-    .filter((s): s is McpServer => !!s)
+    .filter((s): s is McpServer => !!s && s.source === source)
     .map((s) => ({ mcpServerId: s.id, key: s.key, name: s.name, description: s.description }));
+}
+
+/** This user's connected Composio apps — the Plug-ins page's "Connectors" tab. Never
+ * includes sysadmin-managed servers (source "sysadmin"), regardless of binding. */
+export async function listConnectedConnectors(userId: string): Promise<ConnectedConnector[]> {
+  return listConnectedBySource(userId, "composio_catalog");
+}
+
+/** This user's own custom MCP servers — the Plug-ins page's "MCPs" tab. */
+export async function listCustomMcpConnections(userId: string): Promise<ConnectedConnector[]> {
+  return listConnectedBySource(userId, "user_custom");
 }

@@ -31,6 +31,8 @@ import {
   checkToolkitConnectionStatus,
   listConnectedConnectors,
   getPopularCategories,
+  createCustomMcpServer,
+  listCustomMcpConnections,
 } from "./connectors-service";
 import { getLogs } from "./log-buffer";
 import * as zwChannels from "./zoowork-channels";
@@ -676,7 +678,7 @@ export async function registerRoutes(
       const { name, description } = z
         .object({ name: z.string().min(1), description: z.string().nullable().optional() })
         .parse(req.body);
-      const callbackUrl = `${req.protocol}://${req.get("host")}/admin/connectors`;
+      const callbackUrl = `${req.protocol}://${req.get("host")}/admin/plugins`;
       const { redirectUrl } = await startToolkitConnection(
         req.params.slug,
         name,
@@ -715,6 +717,52 @@ export async function registerRoutes(
       res.json({ items: await listConnectedConnectors(req.user.id) });
     } catch (err: any) {
       res.status(500).json({ message: err.message || "Failed to list connected connectors" });
+    }
+  });
+
+  // GET /api/mcps/custom — this user's own custom MCP servers, for the Plug-ins
+  // page's "MCPs" tab.
+  app.get("/api/mcps/custom", async (req, res) => {
+    if (!req.isAuthenticated() || !req.user) {
+      return res.status(401).json({ message: "Not authenticated" });
+    }
+    try {
+      res.json({ items: await listCustomMcpConnections(req.user.id) });
+    } catch (err: any) {
+      res.status(500).json({ message: err.message || "Failed to list custom MCP servers" });
+    }
+  });
+
+  // POST /api/mcps/custom — add and connect a customer's own MCP server. Encrypted at
+  // rest; never echoed back. Always creates a brand new mcpServers row (source
+  // "user_custom") — unlike Connectors, there's no shared catalog to reuse.
+  app.post("/api/mcps/custom", async (req, res) => {
+    if (!req.isAuthenticated() || !req.user) {
+      return res.status(401).json({ message: "Not authenticated" });
+    }
+    try {
+      const body = z
+        .object({
+          name: z.string().min(1).max(100),
+          description: z.string().max(500).nullable().optional(),
+          targetUrl: z.string().url(),
+          authHeaderName: z.string().min(1).max(100).optional(),
+          authScheme: z.string().max(20).optional(),
+          apiKey: z.string().min(1),
+        })
+        .parse(req.body);
+      const server = await createCustomMcpServer(req.user.id, {
+        name: body.name,
+        description: body.description ?? null,
+        targetUrl: body.targetUrl,
+        authHeaderName: body.authHeaderName ?? "Authorization",
+        authScheme: body.authScheme ?? "Bearer ",
+        apiKey: body.apiKey,
+      });
+      res.json({ mcpServerId: server.id, key: server.key, name: server.name });
+    } catch (err: any) {
+      if (err?.name === "ZodError") return res.status(400).json({ message: err.errors[0]?.message || "Invalid input" });
+      res.status(500).json({ message: err.message || "Failed to add custom MCP server" });
     }
   });
 

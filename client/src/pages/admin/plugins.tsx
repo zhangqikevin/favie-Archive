@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link2, Loader2, Search } from "lucide-react";
+import { Link2, Loader2, Plug, Search } from "lucide-react";
 import AdminLayout from "@/components/admin-layout";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -224,22 +224,29 @@ function BrowseTab() {
   );
 }
 
-function ConnectedTab() {
+function ConnectedList({
+  queryKey,
+  emptyKey,
+  disconnectInvalidateKeys,
+}: {
+  queryKey: string;
+  emptyKey: string;
+  disconnectInvalidateKeys: string[];
+}) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
-  const { data, isLoading } = useQuery<{ items: ConnectedItem[] }>({ queryKey: ["/api/connectors/connected"] });
+  const { data, isLoading } = useQuery<{ items: ConnectedItem[] }>({ queryKey: [queryKey] });
   const items = data?.items ?? [];
 
   const disconnectMutation = useMutation({
     mutationFn: (mcpServerId: string) => apiRequest("DELETE", `/api/mcp/connect/${mcpServerId}`),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/connectors/connected"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/connectors/catalog"] });
+      for (const key of disconnectInvalidateKeys) queryClient.invalidateQueries({ queryKey: [key] });
     },
   });
 
   if (isLoading) return <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />;
-  if (items.length === 0) return <p className="text-sm text-muted-foreground">{t("connectors_page.none_connected")}</p>;
+  if (items.length === 0) return <p className="text-sm text-muted-foreground">{t(emptyKey)}</p>;
 
   return (
     <div className="space-y-3">
@@ -271,34 +278,168 @@ function ConnectedTab() {
   );
 }
 
-export default function AdminConnectors() {
+function ConnectorsSection() {
   const { t } = useTranslation();
   const [tab, setTab] = useState<"browse" | "connected">("browse");
 
   return (
+    <div>
+      <div className="flex gap-1 mb-5">
+        {(["browse", "connected"] as const).map((key) => (
+          <button
+            key={key}
+            onClick={() => setTab(key)}
+            className={cn(
+              "px-3 py-1.5 rounded-lg text-sm font-medium transition-colors",
+              tab === key ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted",
+            )}
+            data-testid={`tab-${key}`}
+          >
+            {t(`connectors_page.tab_${key}`)}
+          </button>
+        ))}
+      </div>
+      {tab === "browse" ? (
+        <BrowseTab />
+      ) : (
+        <ConnectedList
+          queryKey="/api/connectors/connected"
+          emptyKey="connectors_page.none_connected"
+          disconnectInvalidateKeys={["/api/connectors/connected", "/api/connectors/catalog"]}
+        />
+      )}
+    </div>
+  );
+}
+
+function AddCustomMcpForm({ onDone }: { onDone: () => void }) {
+  const { t } = useTranslation();
+  const queryClient = useQueryClient();
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [targetUrl, setTargetUrl] = useState("");
+  const [authHeaderName, setAuthHeaderName] = useState("Authorization");
+  const [authScheme, setAuthScheme] = useState("Bearer ");
+  const [apiKey, setApiKey] = useState("");
+
+  const addMutation = useMutation({
+    mutationFn: () =>
+      apiRequest("POST", "/api/mcps/custom", {
+        name,
+        description: description || null,
+        targetUrl,
+        authHeaderName,
+        authScheme,
+        apiKey,
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/mcps/custom"] });
+      onDone();
+    },
+  });
+
+  const canSubmit = name.trim() && targetUrl.trim() && apiKey.trim();
+
+  return (
+    <div className="rounded-xl border border-border bg-card p-4 space-y-3 mb-4">
+      <div>
+        <label className="text-xs font-medium text-muted-foreground">{t("mcps_page.field_name")}</label>
+        <Input value={name} onChange={(e) => setName(e.target.value)} className="mt-1 h-8 text-sm" data-testid="input-mcp-name" />
+      </div>
+      <div>
+        <label className="text-xs font-medium text-muted-foreground">{t("mcps_page.field_description")}</label>
+        <Input value={description} onChange={(e) => setDescription(e.target.value)} className="mt-1 h-8 text-sm" data-testid="input-mcp-description" />
+      </div>
+      <div>
+        <label className="text-xs font-medium text-muted-foreground">{t("mcps_page.field_url")}</label>
+        <Input
+          value={targetUrl}
+          onChange={(e) => setTargetUrl(e.target.value)}
+          placeholder="https://example.com/mcp"
+          className="mt-1 h-8 text-sm font-mono"
+          data-testid="input-mcp-url"
+        />
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <label className="text-xs font-medium text-muted-foreground">{t("mcps_page.field_auth_header")}</label>
+          <Input value={authHeaderName} onChange={(e) => setAuthHeaderName(e.target.value)} className="mt-1 h-8 text-sm font-mono" data-testid="input-mcp-auth-header" />
+        </div>
+        <div>
+          <label className="text-xs font-medium text-muted-foreground">{t("mcps_page.field_auth_scheme")}</label>
+          <Input value={authScheme} onChange={(e) => setAuthScheme(e.target.value)} className="mt-1 h-8 text-sm font-mono" data-testid="input-mcp-auth-scheme" />
+        </div>
+      </div>
+      <div>
+        <label className="text-xs font-medium text-muted-foreground">{t("mcps_page.field_api_key")}</label>
+        <Input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} className="mt-1 h-8 text-sm font-mono" data-testid="input-mcp-api-key" />
+      </div>
+      {addMutation.isError && <p className="text-xs text-destructive">{(addMutation.error as Error)?.message}</p>}
+      <div className="flex gap-2 justify-end pt-1">
+        <Button variant="outline" size="sm" onClick={onDone}>
+          {t("mcps_page.cancel")}
+        </Button>
+        <Button size="sm" disabled={!canSubmit || addMutation.isPending} onClick={() => addMutation.mutate()} data-testid="button-submit-mcp">
+          {addMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : t("mcps_page.add_submit")}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function McpsSection() {
+  const { t } = useTranslation();
+  const [showForm, setShowForm] = useState(false);
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-4">
+        <p className="text-sm text-muted-foreground">{t("mcps_page.subtitle")}</p>
+        {!showForm && (
+          <Button size="sm" onClick={() => setShowForm(true)} data-testid="button-add-mcp">
+            <Plug className="w-3.5 h-3.5 mr-1.5" />
+            {t("mcps_page.add_button")}
+          </Button>
+        )}
+      </div>
+      {showForm && <AddCustomMcpForm onDone={() => setShowForm(false)} />}
+      <ConnectedList
+        queryKey="/api/mcps/custom"
+        emptyKey="mcps_page.empty"
+        disconnectInvalidateKeys={["/api/mcps/custom"]}
+      />
+    </div>
+  );
+}
+
+export default function AdminPlugins() {
+  const { t } = useTranslation();
+  const [section, setSection] = useState<"connectors" | "mcps">("connectors");
+
+  return (
     <AdminLayout>
       <div className="border-b border-border bg-card px-6 py-5">
-        <h1 className="font-serif text-2xl font-bold text-foreground">{t("connectors_page.title")}</h1>
-        <p className="text-sm text-muted-foreground mt-0.5">{t("connectors_page.subtitle")}</p>
+        <h1 className="font-serif text-2xl font-bold text-foreground">{t("plugins_page.title")}</h1>
+        <p className="text-sm text-muted-foreground mt-0.5">{t("plugins_page.subtitle")}</p>
         <div className="flex gap-1 mt-4">
-          {(["browse", "connected"] as const).map((key) => (
+          {(["connectors", "mcps"] as const).map((key) => (
             <button
               key={key}
-              onClick={() => setTab(key)}
+              onClick={() => setSection(key)}
               className={cn(
-                "px-3 py-1.5 rounded-lg text-sm font-medium transition-colors",
-                tab === key ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted",
+                "px-3 py-1.5 rounded-lg text-sm font-semibold transition-colors",
+                section === key ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted",
               )}
-              data-testid={`tab-${key}`}
+              data-testid={`section-${key}`}
             >
-              {t(`connectors_page.tab_${key}`)}
+              {t(`plugins_page.section_${key}`)}
             </button>
           ))}
         </div>
       </div>
 
       <div className="max-w-2xl mx-auto px-6 py-8">
-        {tab === "browse" ? <BrowseTab /> : <ConnectedTab />}
+        {section === "connectors" ? <ConnectorsSection /> : <McpsSection />}
       </div>
     </AdminLayout>
   );

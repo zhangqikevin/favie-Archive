@@ -248,6 +248,13 @@ export const mcpServers = pgTable("mcp_servers", {
   authStyle: varchar("auth_style", { length: 30 }).notNull().default("header_secret"),
   encryptedAdminKey: text("encrypted_admin_key"),           // only set when authStyle is query_param_shared_key
   oauthConfigId: text("oauth_config_id"),                   // Composio auth_config_id, used to start a new OAuth connection
+  // Who/what created this row, NOT whether an admin happened to bind it to an agent — a
+  // sysadmin-created server can be unbound (e.g. FavieData) and must still stay off the
+  // customer-facing Plug-ins page. "sysadmin": system-level, defined in /sysadmin/mcp-servers,
+  // baked into agents as baseline capability, never shown to customers. "composio_catalog":
+  // provisioned on demand from the Connectors "Browse" tab (server/connectors-service.ts).
+  // "user_custom": a customer's own MCP server, added via the Plug-ins "MCPs" tab.
+  source: varchar("source", { length: 20 }).notNull().default("sysadmin"),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
 });

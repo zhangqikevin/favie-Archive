@@ -335,7 +335,7 @@
     "agent_market": "Agent Market",
     "activity": "Activity",
     "files": "Files",
-    "connectors": "Connectors",
+    "plugins": "Plug-ins",
     "settings": "Settings",
     "restaurant_label": "Restaurant",
     "manage_restaurants": "Manage restaurants",
@@ -788,6 +788,25 @@
     "cat_reputation": "Reputation",
     "cat_creators": "Creators",
     "cat_retention": "Retention"
+  },
+  "plugins_page": {
+    "title": "Plug-ins",
+    "subtitle": "Connect your own accounts and MCP servers so your agents can use them.",
+    "section_connectors": "Connectors",
+    "section_mcps": "MCPs"
+  },
+  "mcps_page": {
+    "subtitle": "Connect and manage your own MCP servers.",
+    "empty": "You haven't added any custom MCP servers yet.",
+    "add_button": "Add MCP",
+    "add_submit": "Add & Connect",
+    "cancel": "Cancel",
+    "field_name": "Name",
+    "field_description": "Description (optional)",
+    "field_url": "Server URL",
+    "field_auth_header": "Auth header name",
+    "field_auth_scheme": "Auth scheme (prefix before the key)",
+    "field_api_key": "API key / token"
   },
   "connectors_page": {
     "title": "Connectors",

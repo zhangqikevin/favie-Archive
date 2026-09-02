@@ -335,7 +335,7 @@
     "agent_market": "Agent 市场",
     "activity": "活动记录",
     "files": "文件",
-    "connectors": "连接器",
+    "plugins": "插件",
     "settings": "设置",
     "restaurant_label": "餐厅",
     "manage_restaurants": "管理餐厅",
@@ -788,6 +788,25 @@
     "cat_reputation": "口碑",
     "cat_creators": "创作者",
     "cat_retention": "留存"
+  },
+  "plugins_page": {
+    "title": "插件",
+    "subtitle": "连接你自己的账号和 MCP 服务器，让你的 Agent 可以使用它们。",
+    "section_connectors": "连接器",
+    "section_mcps": "MCP"
+  },
+  "mcps_page": {
+    "subtitle": "连接和管理你自己的 MCP 服务器。",
+    "empty": "你还没有添加任何自定义 MCP 服务器。",
+    "add_button": "添加 MCP",
+    "add_submit": "添加并连接",
+    "cancel": "取消",
+    "field_name": "名称",
+    "field_description": "描述（可选）",
+    "field_url": "服务器 URL",
+    "field_auth_header": "认证 header 名称",
+    "field_auth_scheme": "认证前缀（key 前面加的那段）",
+    "field_api_key": "API key / token"
   },
   "connectors_page": {
     "title": "连接器",

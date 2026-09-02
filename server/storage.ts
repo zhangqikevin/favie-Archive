@@ -96,7 +96,7 @@ export interface IStorage {
   getAgentMcpServerIds(agentCatalogId: string): Promise<string[]>;
   setAgentMcpBindings(agentCatalogId: string, mcpServerIds: string[]): Promise<void>;
   getMcpServersForAgent(agentCatalogId: string): Promise<McpServer[]>;
-  getUnboundMcpServers(): Promise<McpServer[]>;
+  getSelfServeMcpServers(): Promise<McpServer[]>;
 
   getUserMcpCredential(userId: string, mcpServerId: string): Promise<UserMcpCredential | undefined>;
   getUserMcpCredentialByToken(proxyToken: string): Promise<UserMcpCredential | undefined>;
@@ -574,17 +574,16 @@ export class DatabaseStorage implements IStorage {
   }
 
   /**
-   * Servers with no agentMcpBindings row at all, in any catalog entry — i.e. never
-   * explicitly scoped by a sysadmin. These are the ones a customer provisioned themselves
-   * via the Connectors "Browse" tab (server/connectors-service.ts), and are meant to be
-   * available to every one of that customer's agents once they connect it, not gated
-   * behind a separate admin step.
+   * Servers a customer provisioned themselves — via the Connectors "Browse" tab
+   * (source "composio_catalog") or their own custom MCP server (source "user_custom") —
+   * as opposed to sysadmin-managed ones (source "sysadmin", the default). These are
+   * available to every one of that customer's agents once they connect one, not gated
+   * behind a separate admin binding step, and are the only ones the customer-facing
+   * Plug-ins page ever shows.
    */
-  async getUnboundMcpServers(): Promise<McpServer[]> {
-    const allBindings = await db.select({ mcpServerId: agentMcpBindings.mcpServerId }).from(agentMcpBindings);
-    const boundIds = new Set(allBindings.map((b) => b.mcpServerId));
+  async getSelfServeMcpServers(): Promise<McpServer[]> {
     const all = await this.listMcpServers();
-    return all.filter((s) => !boundIds.has(s.id));
+    return all.filter((s) => s.source !== "sysadmin");
   }
 
   async getUserMcpCredential(userId: string, mcpServerId: string): Promise<UserMcpCredential | undefined> {

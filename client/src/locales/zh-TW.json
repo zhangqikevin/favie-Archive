@@ -335,7 +335,7 @@
     "agent_market": "Agent 市場",
     "activity": "活動記錄",
     "files": "檔案",
-    "connectors": "連接器",
+    "plugins": "外掛",
     "settings": "設定",
     "restaurant_label": "餐廳",
     "manage_restaurants": "管理餐廳",
@@ -788,6 +788,25 @@
     "cat_reputation": "口碑",
     "cat_creators": "創作者",
     "cat_retention": "留存"
+  },
+  "plugins_page": {
+    "title": "外掛",
+    "subtitle": "連接你自己的帳號和 MCP 伺服器，讓你的 Agent 可以使用它們。",
+    "section_connectors": "連接器",
+    "section_mcps": "MCP"
+  },
+  "mcps_page": {
+    "subtitle": "連接和管理你自己的 MCP 伺服器。",
+    "empty": "你還沒有新增任何自訂 MCP 伺服器。",
+    "add_button": "新增 MCP",
+    "add_submit": "新增並連接",
+    "cancel": "取消",
+    "field_name": "名稱",
+    "field_description": "描述（選填）",
+    "field_url": "伺服器 URL",
+    "field_auth_header": "認證 header 名稱",
+    "field_auth_scheme": "認證前綴（key 前面加的那段）",
+    "field_api_key": "API key / token"
   },
   "connectors_page": {
     "title": "連接器",
