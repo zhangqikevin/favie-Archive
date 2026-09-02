@@ -2,10 +2,10 @@ import { Link, useLocation } from "wouter";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
-  Users2, Activity, FolderOpen, Settings,
+  Users2, FolderOpen, Settings,
   Utensils, LogOut, Menu, ChevronDown, Check, Building2,
-  Briefcase, ChefHat, Megaphone, Headphones, Plus, Loader2, ShoppingBag,
-  DollarSign, Scale, Star,
+  ChefHat, Headphones, Plus, Loader2, ShoppingBag, Store,
+  DollarSign, Star, ClipboardList, Megaphone, Scale,
 } from "lucide-react";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import {
@@ -18,6 +18,7 @@ import { apiRequest } from "@/lib/queryClient";
 import { cn } from "@/lib/utils";
 import type { Restaurant } from "@shared/schema";
 import OnboardingModal from "@/components/onboarding-modal";
+import RestaurantOnboardingModal from "@/components/restaurant-onboarding-modal";
 
 interface NavItemDef {
   labelKey: string;
@@ -31,19 +32,23 @@ interface NavSection {
   items: NavItemDef[];
 }
 
+// Fixed metadata for the 7 possible agent tabs. Which ones actually show up in the
+// sidebar is driven by the user's subscription (GET /api/agent/my-agents), not this
+// list — this is just icon/label/color, keyed by the same slot id used everywhere
+// else (agent_catalog.key, chat routes, etc).
+const AGENT_TAB_META: Record<string, NavItemDef> = {
+  expert:   { labelKey: "admin.expert",           href: "/admin/agents/expert",    icon: Star,          dot: "bg-rose-500" },
+  chef:     { labelKey: "admin.chef",             href: "/admin/agents/chef",      icon: ChefHat,       dot: "bg-amber-500" },
+  customer: { labelKey: "admin.customer_service", href: "/admin/agents/customer",  icon: Headphones,    dot: "bg-teal-500" },
+  finance:  { labelKey: "admin.finance",          href: "/admin/agents/finance",   icon: DollarSign,    dot: "bg-emerald-500" },
+  operation:{ labelKey: "admin.operation",        href: "/admin/agents/operation", icon: ClipboardList, dot: "bg-sky-500" },
+  social:   { labelKey: "admin.marketing",        href: "/admin/agents/social",    icon: Megaphone,     dot: "bg-purple-500" },
+  legal:    { labelKey: "admin.legal_hr",         href: "/admin/agents/legal",     icon: Scale,         dot: "bg-slate-500" },
+};
+// Stable display order, independent of whatever order the API returns entitled slots in.
+const AGENT_TAB_ORDER = ["expert", "chef", "customer", "finance", "operation", "social", "legal"];
+
 const navSections: NavSection[] = [
-  {
-    sectionLabelKey: "admin.section_agents",
-    items: [
-      { labelKey: "admin.expert",           href: "/admin/agents/expert",    icon: Star,       dot: "bg-rose-500" },
-      { labelKey: "admin.operation",        href: "/admin/agents/operation", icon: Briefcase,  dot: "bg-blue-500" },
-      { labelKey: "admin.chef",             href: "/admin/agents/chef",      icon: ChefHat,    dot: "bg-amber-500" },
-      { labelKey: "admin.marketing",        href: "/admin/agents/social",    icon: Megaphone,  dot: "bg-purple-500" },
-      { labelKey: "admin.customer_service", href: "/admin/agents/customer",  icon: Headphones, dot: "bg-teal-500" },
-      { labelKey: "admin.finance",          href: "/admin/agents/finance",   icon: DollarSign, dot: "bg-emerald-500" },
-      { labelKey: "admin.legal_hr",         href: "/admin/agents/legal",     icon: Scale,      dot: "bg-violet-500" },
-    ],
-  },
   {
     sectionLabelKey: "admin.section_tasks",
     items: [
@@ -51,8 +56,13 @@ const navSections: NavSection[] = [
     ],
   },
   {
+    sectionLabelKey: "admin.section_agent_market",
     items: [
-      { labelKey: "admin.activity", href: "/admin/activity", icon: Activity },
+      { labelKey: "admin.agent_market", href: "/admin/agent-market", icon: Store },
+    ],
+  },
+  {
+    items: [
       { labelKey: "admin.files",    href: "/admin/files",    icon: FolderOpen },
       { labelKey: "admin.settings", href: "/admin/settings", icon: Settings },
     ],
@@ -83,6 +93,41 @@ function NavItem({ href, icon: Icon, labelKey, dot }: NavItemDef) {
       </div>
       <span>{label}</span>
     </Link>
+  );
+}
+
+function AgentNavSection() {
+  const { t } = useTranslation();
+  const { data, isLoading } = useQuery<{ slots: string[] }>({
+    queryKey: ["/api/agent/my-agents"],
+  });
+
+  const entitled = new Set(data?.slots ?? []);
+  const items = AGENT_TAB_ORDER.filter((slot) => entitled.has(slot)).map((slot) => AGENT_TAB_META[slot]);
+
+  return (
+    <div>
+      <p className="text-sm font-semibold text-muted-foreground uppercase tracking-wider px-3 mb-1.5">
+        {t("admin.section_agents")}
+      </p>
+      <div className="space-y-0.5">
+        {isLoading ? (
+          <div className="px-3 py-2">
+            <Loader2 className="w-3.5 h-3.5 text-muted-foreground animate-spin" />
+          </div>
+        ) : items.length > 0 ? (
+          items.map((item) => <NavItem key={item.href} {...item} />)
+        ) : (
+          <Link
+            href="/admin/agent-market"
+            className="block px-3 py-2 text-sm text-muted-foreground italic hover:text-foreground transition-colors"
+          >
+            {t("admin.no_agents_yet")}
+          </Link>
+        )}
+      </div>
+      <div className="border-t border-border mt-3" />
+    </div>
   );
 }
 
@@ -208,6 +253,7 @@ function SidebarContent({ onNavigate, onShowOnboarding }: { onNavigate?: () => v
 
       {/* Nav */}
       <nav className="flex-1 px-3 py-3 space-y-4 overflow-y-auto" onClick={onNavigate}>
+        <AgentNavSection />
         {navSections.map((section, si) => (
           <div key={si}>
             {section.sectionLabelKey && (
@@ -293,6 +339,9 @@ export default function AdminLayout({ children, chatMode }: AdminLayoutProps) {
 
       {/* Post-login onboarding modal */}
       <OnboardingModal debugOpen={debugOnboarding} onDebugClose={() => setDebugOnboarding(false)} />
+      {/* Restaurant data-sync wizard — steps 2 & 3 once a restaurant exists.
+          Step 1 (no restaurant yet) is still handled by each page's own gate. */}
+      <RestaurantOnboardingModal />
     </div>
   );
 }

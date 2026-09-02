@@ -7,6 +7,7 @@ import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { BookCallProvider } from "@/lib/book-call-context";
 import { AuthProvider } from "@/lib/auth-context";
+import { AdminAuthProvider } from "@/lib/admin-auth-context";
 import Home from "@/pages/home";
 import ServicesOverview from "@/pages/services-overview";
 import ServiceDetail from "@/pages/service-detail";
@@ -31,9 +32,16 @@ import AdminSettings from "@/pages/admin/settings";
 import AdminActivity from "@/pages/admin/activity";
 import AdminFiles from "@/pages/admin/files";
 import TaskMarket from "@/pages/admin/task-market";
+import AgentMarket from "@/pages/admin/agent-market";
 import AgentChatPage from "@/pages/admin/agents";
 import AgentPage from "@/pages/agent-page";
 import UberEatsLab from "@/pages/ubereats-lab";
+import SysAdminLogin from "@/pages/sysadmin/login";
+import SysAdminCustomers from "@/pages/sysadmin/customers";
+import SysAdminAgents from "@/pages/sysadmin/agents";
+import SysAdminMcpServers from "@/pages/sysadmin/mcp-servers";
+import SysAdminProducts from "@/pages/sysadmin/products";
+import SysAdminPayments from "@/pages/sysadmin/payments";
 import NotFound from "@/pages/not-found";
 
 function ScrollToTop() {
@@ -81,7 +89,14 @@ function Router() {
         <Route path="/admin/activity" component={AdminActivity} />
         <Route path="/admin/files" component={AdminFiles} />
         <Route path="/admin/task-market" component={TaskMarket} />
+        <Route path="/admin/agent-market" component={AgentMarket} />
         <Route path="/ubereats-lab" component={UberEatsLab} />
+        <Route path="/sysadmin/login" component={SysAdminLogin} />
+        <Route path="/sysadmin/customers" component={SysAdminCustomers} />
+        <Route path="/sysadmin/agents" component={SysAdminAgents} />
+        <Route path="/sysadmin/mcp-servers" component={SysAdminMcpServers} />
+        <Route path="/sysadmin/products" component={SysAdminProducts} />
+        <Route path="/sysadmin/payments" component={SysAdminPayments} />
         <Route component={NotFound} />
       </Switch>
     </>
@@ -93,10 +108,12 @@ function App() {
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
         <AuthProvider>
-          <BookCallProvider>
-            <Router />
-            <Toaster />
-          </BookCallProvider>
+          <AdminAuthProvider>
+            <BookCallProvider>
+              <Router />
+              <Toaster />
+            </BookCallProvider>
+          </AdminAuthProvider>
         </AuthProvider>
       </TooltipProvider>
     </QueryClientProvider>

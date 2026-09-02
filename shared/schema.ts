@@ -163,20 +163,209 @@ export const insertUserOpenclawSettingsSchema = createInsertSchema(userOpenclawS
 export type InsertUserOpenclawSettings = z.infer<typeof insertUserOpenclawSettingsSchema>;
 export type UserOpenclawSettings = typeof userOpenclawSettings.$inferSelect;
 
-// ─── Channel Bindings ──────────────────────────────────────────────────────────
+// ─── System Admin ──────────────────────────────────────────────────────────────
+// Separate credential space from customer `users` — deliberately not the same
+// table, so a bug in customer auth can never grant back-office access.
 
-export const channelBindings = pgTable("channel_bindings", {
+export const adminUsers = pgTable("admin_users", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  email: text("email").notNull().unique(),
+  password: text("password").notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export type AdminUser = typeof adminUsers.$inferSelect;
+export type InsertAdminUser = typeof adminUsers.$inferInsert;
+
+// ─── Agent Catalog ─────────────────────────────────────────────────────────────
+// Our own record of each sellable agent. `zooworkAgentId` is filled in once the
+// underlying ZooWork Managed Agent has been created/synced from this row.
+
+export const agentCatalog = pgTable("agent_catalog", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  key: varchar("key", { length: 50 }).notNull().unique(), // stable slug, e.g. "general"
+  name: text("name").notNull(),
+  description: text("description"),
+  model: text("model"),                          // e.g. "litellm/claude-sonnet-5"
+  personaPrompt: text("persona_prompt").notNull().default(""),
+  skillIds: jsonb("skill_ids").notNull().default(sql`'[]'::jsonb`), // ZooWork skill ids attached (desired state, applied per-user on sync)
+  visible: boolean("visible").notNull().default(true),      // shown to customers in storefront
+  individualPriceCents: integer("individual_price_cents").notNull().default(0), // à la carte monthly add-on price
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+export const insertAgentCatalogSchema = createInsertSchema(agentCatalog).omit({
+  id: true, createdAt: true, updatedAt: true,
+});
+export type InsertAgentCatalog = z.infer<typeof insertAgentCatalogSchema>;
+export type AgentCatalogEntry = typeof agentCatalog.$inferSelect;
+
+// Every ZooWork agent is now per-customer (MCP credentials are per-customer, and
+// `mcp`/`persona`/`model` are agent-level fields on the ZooWork side — there is no
+// way to vary them per session of a shared agent). `userId` NULL is reserved for
+// the System Admin "preview" instance seeded at boot, used to test-sync a catalog
+// entry without needing a real customer.
+export const userAgentInstances = pgTable("user_agent_instances", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   userId: varchar("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
-  restaurantId: varchar("restaurant_id").notNull(),
-  agentId: varchar("agent_id", { length: 50 }).notNull(),
-  channelType: varchar("channel_type", { length: 30 }).notNull(), // "telegram" | "discord" | "slack" ...
-  channelConfig: jsonb("channel_config").notNull(),               // platform-specific: { botToken, botUsername, ... }
-  active: boolean("active").notNull().default(true),
+  agentCatalogId: varchar("agent_catalog_id").notNull().references(() => agentCatalog.id, { onDelete: "cascade" }),
+  zooworkAgentId: text("zoowork_agent_id"),
+  syncedHash: text("synced_hash"), // hash of (model, personaPrompt, skillIds, mcp config) last pushed
   createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
 }, (t) => [
-  index("channel_bindings_user_idx").on(t.userId, t.restaurantId, t.agentId),
+  index("user_agent_instances_user_catalog_idx").on(t.userId, t.agentCatalogId),
 ]);
 
-export type ChannelBinding = typeof channelBindings.$inferSelect;
-export type InsertChannelBinding = typeof channelBindings.$inferInsert;
+export type UserAgentInstance = typeof userAgentInstances.$inferSelect;
+export type InsertUserAgentInstance = typeof userAgentInstances.$inferInsert;
+
+// ─── MCP Servers ────────────────────────────────────────────────────────────────
+// Admin-configured "real" MCP servers that require auth. Favie hosts a public,
+// unauthenticated proxy (server/mcp-proxy.ts) that ZooWork's `mcp` field points
+// at instead; the proxy injects each customer's own key server-side.
+
+export const mcpServers = pgTable("mcp_servers", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  key: varchar("key", { length: 50 }).notNull().unique(),
+  name: text("name").notNull(),
+  description: text("description"),
+  targetUrl: text("target_url").notNull(),                 // the real, authenticated MCP server
+  transport: varchar("transport", { length: 20 }).notNull().default("streamable-http"),
+  authHeaderName: varchar("auth_header_name", { length: 100 }).notNull().default("Authorization"),
+  authScheme: varchar("auth_scheme", { length: 20 }).notNull().default("Bearer "), // prefix before the key, e.g. "Bearer "
+  // "header_secret": each user's own encryptedKey is the header value (e.g. a personal GitHub PAT).
+  // "query_param_shared_key": encryptedAdminKey is the header value for every user of this server
+  // (e.g. a Composio project key); each user's encryptedKey is instead appended as ?user_id=
+  // on targetUrl to select which connected account the call runs as.
+  authStyle: varchar("auth_style", { length: 30 }).notNull().default("header_secret"),
+  encryptedAdminKey: text("encrypted_admin_key"),           // only set when authStyle is query_param_shared_key
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+export const insertMcpServerSchema = createInsertSchema(mcpServers).omit({
+  id: true, createdAt: true, updatedAt: true,
+});
+export type InsertMcpServer = z.infer<typeof insertMcpServerSchema>;
+export type McpServer = typeof mcpServers.$inferSelect;
+
+// Which MCP servers a given agent template offers (desired state; each customer
+// still needs their own credential before it's actually attached to their agent).
+export const agentMcpBindings = pgTable("agent_mcp_bindings", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  agentCatalogId: varchar("agent_catalog_id").notNull().references(() => agentCatalog.id, { onDelete: "cascade" }),
+  mcpServerId: varchar("mcp_server_id").notNull().references(() => mcpServers.id, { onDelete: "cascade" }),
+}, (t) => [
+  index("agent_mcp_bindings_catalog_idx").on(t.agentCatalogId),
+]);
+
+export type AgentMcpBinding = typeof agentMcpBindings.$inferSelect;
+
+// One customer's own key for one MCP server. `encryptedKey` is AES-256-GCM
+// ciphertext (see server/crypto.ts) — never stored or returned in plaintext.
+// `proxyToken` is the unguessable path segment ZooWork's `mcp.url` points at;
+// stable across re-syncs so the ZooWork agent config doesn't change when the
+// key itself is rotated.
+export const userMcpCredentials = pgTable("user_mcp_credentials", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  userId: varchar("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  mcpServerId: varchar("mcp_server_id").notNull().references(() => mcpServers.id, { onDelete: "cascade" }),
+  proxyToken: varchar("proxy_token", { length: 64 }).notNull().unique(),
+  encryptedKey: text("encrypted_key").notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (t) => [
+  index("user_mcp_credentials_user_idx").on(t.userId, t.mcpServerId),
+]);
+
+export type UserMcpCredential = typeof userMcpCredentials.$inferSelect;
+export type InsertUserMcpCredential = typeof userMcpCredentials.$inferInsert;
+
+// ─── Restaurant Data Onboarding ─────────────────────────────────────────────────
+// Step 2 of the post-login restaurant wizard: at least one of these six rows must
+// end up `connected` before the customer can move on. `permission` platforms
+// (ubereats, doordash, chowbus, menusifu) are verified with a mock check for now;
+// `api_key` platforms (toast, square) are considered connected once a key is saved.
+
+export const restaurantPlatformConnections = pgTable("restaurant_platform_connections", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  restaurantId: varchar("restaurant_id").notNull().references(() => restaurants.id, { onDelete: "cascade" }),
+  platform: varchar("platform", { length: 20 }).notNull(), // ubereats | doordash | toast | square | chowbus | menusifu
+  method: varchar("method", { length: 20 }).notNull(),     // permission | api_key
+  apiKeyEncrypted: text("api_key_encrypted"),
+  connected: boolean("connected").notNull().default(false),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+}, (t) => [
+  index("restaurant_platform_connections_restaurant_idx").on(t.restaurantId, t.platform),
+]);
+
+export type RestaurantPlatformConnection = typeof restaurantPlatformConnections.$inferSelect;
+export type InsertRestaurantPlatformConnection = typeof restaurantPlatformConnections.$inferInsert;
+
+// ─── Agent Packages (subscription bundles) ─────────────────────────────────────
+
+export const agentPackages = pgTable("agent_packages", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  name: text("name").notNull(),
+  description: text("description"),
+  priceCents: integer("price_cents").notNull().default(0),        // monthly price of the bundle
+  monthlyTokenQuota: integer("monthly_token_quota").notNull().default(0),
+  active: boolean("active").notNull().default(true),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+export const insertAgentPackageSchema = createInsertSchema(agentPackages).omit({
+  id: true, createdAt: true, updatedAt: true,
+});
+export type InsertAgentPackage = z.infer<typeof insertAgentPackageSchema>;
+export type AgentPackage = typeof agentPackages.$inferSelect;
+
+export const agentPackageItems = pgTable("agent_package_items", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  packageId: varchar("package_id").notNull().references(() => agentPackages.id, { onDelete: "cascade" }),
+  agentId: varchar("agent_id").notNull().references(() => agentCatalog.id, { onDelete: "cascade" }),
+}, (t) => [
+  index("agent_package_items_package_idx").on(t.packageId),
+]);
+
+export type AgentPackageItem = typeof agentPackageItems.$inferSelect;
+
+// ─── Customer Subscriptions ─────────────────────────────────────────────────────
+// Assignable from System Admin, or self-serve via the Agent Market
+// (POST /api/agent-market/purchase) for à la carte agents.
+
+export const subscriptions = pgTable("subscriptions", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  userId: varchar("user_id").notNull().references(() => users.id, { onDelete: "cascade" }).unique(),
+  packageId: varchar("package_id").references(() => agentPackages.id, { onDelete: "set null" }),
+  addonAgentIds: jsonb("addon_agent_ids").notNull().default(sql`'[]'::jsonb`).$type<string[]>(), // extra à la carte agent ids
+  status: varchar("status", { length: 20 }).notNull().default("active"), // active | canceled
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+export type Subscription = typeof subscriptions.$inferSelect;
+export type InsertSubscription = typeof subscriptions.$inferInsert;
+
+// ─── Payment Records (mocked — no live payment gateway yet) ────────────────────
+
+export const paymentRecords = pgTable("payment_records", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  userId: varchar("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  kind: varchar("kind", { length: 30 }).notNull(),      // package_subscribe | addon_purchase | renewal
+  packageId: varchar("package_id").references(() => agentPackages.id, { onDelete: "set null" }),
+  agentId: varchar("agent_id").references(() => agentCatalog.id, { onDelete: "set null" }),
+  amountCents: integer("amount_cents").notNull(),
+  status: varchar("status", { length: 20 }).notNull(),  // initiated | succeeded | failed
+  failureReason: text("failure_reason"),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (t) => [
+  index("payment_records_user_idx").on(t.userId),
+]);
+
+export type PaymentRecord = typeof paymentRecords.$inferSelect;
+export type InsertPaymentRecord = typeof paymentRecords.$inferInsert;

@@ -14,6 +14,7 @@ declare global {
       email: string;
       password: string;
       selectedPlan: string | null;
+      currentRestaurantId: string | null;
     }
   }
 }
@@ -33,20 +34,40 @@ export function verifyPassword(password: string, stored: string): boolean {
 
 const SessionStore = (MemoryStore as any)(session);
 
+const SYSADMIN_PATH = /^\/api\/sysadmin/;
+
 export function setupAuth(app: Express) {
-  app.use(
-    session({
-      secret: process.env.SESSION_SECRET || "fallback-dev-secret",
-      resave: false,
-      saveUninitialized: false,
-      store: new SessionStore({ checkPeriod: 86400000 }),
-      cookie: {
-        maxAge: 7 * 24 * 60 * 60 * 1000,
-        httpOnly: true,
-        sameSite: "lax",
-      },
-    })
-  );
+  const customerSession = session({
+    secret: process.env.SESSION_SECRET || "fallback-dev-secret",
+    resave: false,
+    saveUninitialized: false,
+    store: new SessionStore({ checkPeriod: 86400000 }),
+    cookie: {
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+      httpOnly: true,
+      sameSite: "lax",
+    },
+  });
+
+  // System Admin gets its own session cookie/store, scoped to /api/sysadmin/*.
+  // Without this, logging in as an admin and a customer in the same browser
+  // would fight over one session — passport's req.login() regenerates the
+  // session on login, silently signing the other one out.
+  const adminSession = session({
+    name: "favie.admin.sid",
+    secret: process.env.SESSION_SECRET || "fallback-dev-secret",
+    resave: false,
+    saveUninitialized: false,
+    store: new SessionStore({ checkPeriod: 86400000 }),
+    cookie: {
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+      httpOnly: true,
+      sameSite: "lax",
+    },
+  });
+
+  app.use("/api/sysadmin", adminSession);
+  app.use((req, res, next) => (SYSADMIN_PATH.test(req.path) ? next() : customerSession(req, res, next)));
 
   app.use(passport.initialize());
   app.use(passport.session());

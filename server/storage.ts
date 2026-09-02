@@ -1,6 +1,7 @@
 import { drizzle } from "drizzle-orm/node-postgres";
 import { eq, desc, asc, and, gte, sql } from "drizzle-orm";
 import pg from "pg";
+import { randomBytes } from "crypto";
 import {
   users, type User, type InsertUser,
   uberEatsConnections, type UberEatsConnection, type InsertUberEatsConnection,
@@ -9,8 +10,18 @@ import {
   taskRuns, type TaskRun, type InsertTaskRun,
   chatMessages, type ChatMessage, type InsertChatMessage,
   systemConfig,
-  channelBindings, type ChannelBinding, type InsertChannelBinding,
   userOpenclawSettings, type UserOpenclawSettings,
+  adminUsers, type AdminUser,
+  agentCatalog, type AgentCatalogEntry, type InsertAgentCatalog,
+  agentPackages, type AgentPackage, type InsertAgentPackage,
+  agentPackageItems,
+  subscriptions, type Subscription,
+  paymentRecords, type PaymentRecord, type InsertPaymentRecord,
+  userAgentInstances, type UserAgentInstance,
+  mcpServers, type McpServer, type InsertMcpServer,
+  agentMcpBindings,
+  userMcpCredentials, type UserMcpCredential,
+  restaurantPlatformConnections, type RestaurantPlatformConnection,
 } from "@shared/schema";
 
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
@@ -41,19 +52,61 @@ export interface IStorage {
   setSystemConfig(updates: Record<string, string>): Promise<void>;
   getUserOpenclawSettings(userId: string): Promise<UserOpenclawSettings | undefined>;
   setUserOpenclawSettings(userId: string, updates: { baseUrl?: string | null; apiKey?: string | null }): Promise<void>;
-  getChannelBinding(userId: string, restaurantId: string, agentId: string, channelType: string): Promise<ChannelBinding | undefined>;
-  getChannelBindings(userId: string, restaurantId: string, agentId: string): Promise<ChannelBinding[]>;
-  getChannelBindingByToken(channelType: string, token: string): Promise<ChannelBinding | undefined>;
-  saveChannelBinding(data: InsertChannelBinding): Promise<ChannelBinding>;
-  updateChannelBindingConfig(id: string, patch: Record<string, string>): Promise<void>;
-  setChannelBindingActive(id: string, active: boolean): Promise<void>;
-  deleteChannelBinding(userId: string, restaurantId: string, agentId: string, channelType: string): Promise<void>;
-  getAllActiveChannelBindings(agentId: string, userId: string): Promise<ChannelBinding[]>;
-  getAllActiveChannelBindingsByType(channelType: string): Promise<ChannelBinding[]>;
-  getChannelBindingById(id: string): Promise<ChannelBinding | undefined>;
-  deleteAllChannelBindingsByTypeAndUser(userId: string, channelType: string): Promise<string[]>;
   getAllUsers(): Promise<User[]>;
   getAllChatHistorySince(userId: string, since: Date): Promise<ChatMessage[]>;
+
+  // ── System Admin ──
+  getAdminByEmail(email: string): Promise<AdminUser | undefined>;
+  getAdminById(id: string): Promise<AdminUser | undefined>;
+  countAdminUsers(): Promise<number>;
+  createAdminUser(data: { email: string; password: string }): Promise<AdminUser>;
+
+  listAgentCatalog(): Promise<AgentCatalogEntry[]>;
+  getAgentCatalogById(id: string): Promise<AgentCatalogEntry | undefined>;
+  getAgentCatalogByKey(key: string): Promise<AgentCatalogEntry | undefined>;
+  createAgentCatalogEntry(data: InsertAgentCatalog): Promise<AgentCatalogEntry>;
+  updateAgentCatalogEntry(id: string, patch: Partial<InsertAgentCatalog>): Promise<AgentCatalogEntry>;
+  deleteAgentCatalogEntry(id: string): Promise<void>;
+
+  listAgentPackages(): Promise<AgentPackage[]>;
+  getAgentPackage(id: string): Promise<AgentPackage | undefined>;
+  createAgentPackage(data: InsertAgentPackage): Promise<AgentPackage>;
+  updateAgentPackage(id: string, patch: Partial<InsertAgentPackage>): Promise<AgentPackage>;
+  deleteAgentPackage(id: string): Promise<void>;
+  getAgentPackageItemIds(packageId: string): Promise<string[]>;
+  setAgentPackageItems(packageId: string, agentIds: string[]): Promise<void>;
+
+  getSubscriptionByUser(userId: string): Promise<Subscription | undefined>;
+  upsertSubscription(userId: string, data: { packageId: string | null; addonAgentIds: string[]; status: string }): Promise<Subscription>;
+
+  createPaymentRecord(data: InsertPaymentRecord): Promise<PaymentRecord>;
+  listPaymentRecords(opts?: { userId?: string; limit?: number }): Promise<PaymentRecord[]>;
+
+  getUserAgentInstance(userId: string, agentCatalogId: string): Promise<UserAgentInstance | undefined>;
+  upsertUserAgentInstanceSync(userId: string, agentCatalogId: string, zooworkAgentId: string, syncedHash: string): Promise<void>;
+
+  listMcpServers(): Promise<McpServer[]>;
+  getMcpServer(id: string): Promise<McpServer | undefined>;
+  createMcpServer(data: InsertMcpServer): Promise<McpServer>;
+  updateMcpServer(id: string, patch: Partial<InsertMcpServer>): Promise<McpServer>;
+  deleteMcpServer(id: string): Promise<void>;
+
+  getAgentMcpServerIds(agentCatalogId: string): Promise<string[]>;
+  setAgentMcpBindings(agentCatalogId: string, mcpServerIds: string[]): Promise<void>;
+  getMcpServersForAgent(agentCatalogId: string): Promise<McpServer[]>;
+
+  getUserMcpCredential(userId: string, mcpServerId: string): Promise<UserMcpCredential | undefined>;
+  getUserMcpCredentialByToken(proxyToken: string): Promise<UserMcpCredential | undefined>;
+  listUserMcpCredentials(userId: string): Promise<UserMcpCredential[]>;
+  upsertUserMcpCredential(userId: string, mcpServerId: string, encryptedKey: string): Promise<UserMcpCredential>;
+  deleteUserMcpCredential(userId: string, mcpServerId: string): Promise<void>;
+
+  listRestaurantPlatformConnections(restaurantId: string): Promise<RestaurantPlatformConnection[]>;
+  upsertRestaurantPlatformConnection(
+    restaurantId: string,
+    platform: string,
+    patch: { method: string; apiKeyEncrypted?: string | null; connected: boolean },
+  ): Promise<RestaurantPlatformConnection>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -305,117 +358,277 @@ export class DatabaseStorage implements IStorage {
     }
   }
 
-  async getChannelBinding(userId: string, restaurantId: string, agentId: string, channelType: string): Promise<ChannelBinding | undefined> {
-    const [binding] = await db
-      .select()
-      .from(channelBindings)
-      .where(
-        and(
-          eq(channelBindings.userId, userId),
-          eq(channelBindings.restaurantId, restaurantId),
-          eq(channelBindings.agentId, agentId),
-          eq(channelBindings.channelType, channelType),
-        )
-      );
-    return binding;
-  }
+  // ── System Admin ──────────────────────────────────────────────────────────
 
-  async getChannelBindings(userId: string, restaurantId: string, agentId: string): Promise<ChannelBinding[]> {
-    return db
-      .select()
-      .from(channelBindings)
-      .where(
-        and(
-          eq(channelBindings.userId, userId),
-          eq(channelBindings.restaurantId, restaurantId),
-          eq(channelBindings.agentId, agentId),
-        )
-      );
-  }
-
-  async getChannelBindingByToken(channelType: string, token: string): Promise<ChannelBinding | undefined> {
-    const rows = await db
-      .select()
-      .from(channelBindings)
-      .where(eq(channelBindings.channelType, channelType));
-    return rows.find((r) => {
-      const cfg = r.channelConfig as Record<string, unknown>;
-      return cfg.botToken === token;
-    });
-  }
-
-  async saveChannelBinding(data: InsertChannelBinding): Promise<ChannelBinding> {
-    const existing = await this.getChannelBinding(data.userId, data.restaurantId, data.agentId, data.channelType);
-    if (existing) {
-      const [updated] = await db
-        .update(channelBindings)
-        .set({ channelConfig: data.channelConfig, active: data.active ?? true })
-        .where(eq(channelBindings.id, existing.id))
-        .returning();
-      return updated;
-    }
-    const [created] = await db.insert(channelBindings).values(data).returning();
-    return created;
-  }
-
-  async updateChannelBindingConfig(id: string, patch: Record<string, string>): Promise<void> {
-    const [existing] = await db.select().from(channelBindings).where(eq(channelBindings.id, id));
-    if (!existing) return;
-    const merged = { ...(existing.channelConfig as Record<string, string>), ...patch };
-    await db.update(channelBindings).set({ channelConfig: merged }).where(eq(channelBindings.id, id));
-  }
-
-  async setChannelBindingActive(id: string, active: boolean): Promise<void> {
-    await db.update(channelBindings).set({ active }).where(eq(channelBindings.id, id));
-  }
-
-  async getAllActiveChannelBindingsByType(channelType: string): Promise<ChannelBinding[]> {
-    return db.select().from(channelBindings).where(
-      and(eq(channelBindings.channelType, channelType), eq(channelBindings.active, true))
-    );
-  }
-
-  async getChannelBindingById(id: string): Promise<ChannelBinding | undefined> {
-    const [row] = await db.select().from(channelBindings).where(eq(channelBindings.id, id));
+  async getAdminByEmail(email: string): Promise<AdminUser | undefined> {
+    const [row] = await db.select().from(adminUsers).where(eq(adminUsers.email, email));
     return row;
   }
 
-  async deleteAllChannelBindingsByTypeAndUser(userId: string, channelType: string): Promise<string[]> {
-    const rows = await db.select({ id: channelBindings.id })
-      .from(channelBindings)
-      .where(and(eq(channelBindings.userId, userId), eq(channelBindings.channelType, channelType)));
-    if (rows.length > 0) {
-      await db.delete(channelBindings).where(
-        and(eq(channelBindings.userId, userId), eq(channelBindings.channelType, channelType))
-      );
-    }
-    return rows.map(r => r.id);
+  async getAdminById(id: string): Promise<AdminUser | undefined> {
+    const [row] = await db.select().from(adminUsers).where(eq(adminUsers.id, id));
+    return row;
   }
 
-  async getAllActiveChannelBindings(agentId: string, userId: string): Promise<ChannelBinding[]> {
+  async countAdminUsers(): Promise<number> {
+    const rows = await db.select().from(adminUsers);
+    return rows.length;
+  }
+
+  async createAdminUser(data: { email: string; password: string }): Promise<AdminUser> {
+    const [row] = await db.insert(adminUsers).values(data).returning();
+    return row;
+  }
+
+  async listAgentCatalog(): Promise<AgentCatalogEntry[]> {
+    return db.select().from(agentCatalog).orderBy(asc(agentCatalog.createdAt));
+  }
+
+  async getAgentCatalogById(id: string): Promise<AgentCatalogEntry | undefined> {
+    const [row] = await db.select().from(agentCatalog).where(eq(agentCatalog.id, id));
+    return row;
+  }
+
+  async getAgentCatalogByKey(key: string): Promise<AgentCatalogEntry | undefined> {
+    const [row] = await db.select().from(agentCatalog).where(eq(agentCatalog.key, key));
+    return row;
+  }
+
+  async createAgentCatalogEntry(data: InsertAgentCatalog): Promise<AgentCatalogEntry> {
+    const [row] = await db.insert(agentCatalog).values(data).returning();
+    return row;
+  }
+
+  async updateAgentCatalogEntry(id: string, patch: Partial<InsertAgentCatalog>): Promise<AgentCatalogEntry> {
+    const [row] = await db
+      .update(agentCatalog)
+      .set({ ...patch, updatedAt: new Date() })
+      .where(eq(agentCatalog.id, id))
+      .returning();
+    return row;
+  }
+
+  async deleteAgentCatalogEntry(id: string): Promise<void> {
+    await db.delete(agentCatalog).where(eq(agentCatalog.id, id));
+  }
+
+  async listAgentPackages(): Promise<AgentPackage[]> {
+    return db.select().from(agentPackages).orderBy(asc(agentPackages.createdAt));
+  }
+
+  async getAgentPackage(id: string): Promise<AgentPackage | undefined> {
+    const [row] = await db.select().from(agentPackages).where(eq(agentPackages.id, id));
+    return row;
+  }
+
+  async createAgentPackage(data: InsertAgentPackage): Promise<AgentPackage> {
+    const [row] = await db.insert(agentPackages).values(data).returning();
+    return row;
+  }
+
+  async updateAgentPackage(id: string, patch: Partial<InsertAgentPackage>): Promise<AgentPackage> {
+    const [row] = await db
+      .update(agentPackages)
+      .set({ ...patch, updatedAt: new Date() })
+      .where(eq(agentPackages.id, id))
+      .returning();
+    return row;
+  }
+
+  async deleteAgentPackage(id: string): Promise<void> {
+    await db.delete(agentPackages).where(eq(agentPackages.id, id));
+  }
+
+  async getAgentPackageItemIds(packageId: string): Promise<string[]> {
+    const rows = await db
+      .select()
+      .from(agentPackageItems)
+      .where(eq(agentPackageItems.packageId, packageId));
+    return rows.map((r) => r.agentId);
+  }
+
+  async setAgentPackageItems(packageId: string, agentIds: string[]): Promise<void> {
+    await db.delete(agentPackageItems).where(eq(agentPackageItems.packageId, packageId));
+    if (agentIds.length > 0) {
+      await db.insert(agentPackageItems).values(agentIds.map((agentId) => ({ packageId, agentId })));
+    }
+  }
+
+  async getSubscriptionByUser(userId: string): Promise<Subscription | undefined> {
+    const [row] = await db.select().from(subscriptions).where(eq(subscriptions.userId, userId));
+    return row;
+  }
+
+  async upsertSubscription(
+    userId: string,
+    data: { packageId: string | null; addonAgentIds: string[]; status: string },
+  ): Promise<Subscription> {
+    const existing = await this.getSubscriptionByUser(userId);
+    if (existing) {
+      const [row] = await db
+        .update(subscriptions)
+        .set({ ...data, updatedAt: new Date() })
+        .where(eq(subscriptions.userId, userId))
+        .returning();
+      return row;
+    }
+    const [row] = await db.insert(subscriptions).values({ userId, ...data }).returning();
+    return row;
+  }
+
+  async createPaymentRecord(data: InsertPaymentRecord): Promise<PaymentRecord> {
+    const [row] = await db.insert(paymentRecords).values(data).returning();
+    return row;
+  }
+
+  async listPaymentRecords(opts?: { userId?: string; limit?: number }): Promise<PaymentRecord[]> {
+    const conditions = opts?.userId ? [eq(paymentRecords.userId, opts.userId)] : [];
+    const q = db.select().from(paymentRecords)
+      .where(conditions.length ? and(...conditions) : undefined)
+      .orderBy(desc(paymentRecords.createdAt));
+    return opts?.limit ? q.limit(opts.limit) : q;
+  }
+
+  async getUserAgentInstance(userId: string, agentCatalogId: string): Promise<UserAgentInstance | undefined> {
+    const [row] = await db
+      .select()
+      .from(userAgentInstances)
+      .where(and(eq(userAgentInstances.userId, userId), eq(userAgentInstances.agentCatalogId, agentCatalogId)));
+    return row;
+  }
+
+  async upsertUserAgentInstanceSync(userId: string, agentCatalogId: string, zooworkAgentId: string, syncedHash: string): Promise<void> {
+    const existing = await this.getUserAgentInstance(userId, agentCatalogId);
+    if (existing) {
+      await db
+        .update(userAgentInstances)
+        .set({ zooworkAgentId, syncedHash, updatedAt: new Date() })
+        .where(eq(userAgentInstances.id, existing.id));
+      return;
+    }
+    await db.insert(userAgentInstances).values({ userId, agentCatalogId, zooworkAgentId, syncedHash });
+  }
+
+  async listMcpServers(): Promise<McpServer[]> {
+    return db.select().from(mcpServers).orderBy(asc(mcpServers.createdAt));
+  }
+
+  async getMcpServer(id: string): Promise<McpServer | undefined> {
+    const [row] = await db.select().from(mcpServers).where(eq(mcpServers.id, id));
+    return row;
+  }
+
+  async createMcpServer(data: InsertMcpServer): Promise<McpServer> {
+    const [row] = await db.insert(mcpServers).values(data).returning();
+    return row;
+  }
+
+  async updateMcpServer(id: string, patch: Partial<InsertMcpServer>): Promise<McpServer> {
+    const [row] = await db
+      .update(mcpServers)
+      .set({ ...patch, updatedAt: new Date() })
+      .where(eq(mcpServers.id, id))
+      .returning();
+    return row;
+  }
+
+  async deleteMcpServer(id: string): Promise<void> {
+    await db.delete(mcpServers).where(eq(mcpServers.id, id));
+  }
+
+  async getAgentMcpServerIds(agentCatalogId: string): Promise<string[]> {
+    const rows = await db.select().from(agentMcpBindings).where(eq(agentMcpBindings.agentCatalogId, agentCatalogId));
+    return rows.map((r) => r.mcpServerId);
+  }
+
+  async setAgentMcpBindings(agentCatalogId: string, mcpServerIds: string[]): Promise<void> {
+    await db.delete(agentMcpBindings).where(eq(agentMcpBindings.agentCatalogId, agentCatalogId));
+    if (mcpServerIds.length > 0) {
+      await db.insert(agentMcpBindings).values(mcpServerIds.map((mcpServerId) => ({ agentCatalogId, mcpServerId })));
+    }
+  }
+
+  async getMcpServersForAgent(agentCatalogId: string): Promise<McpServer[]> {
+    const ids = await this.getAgentMcpServerIds(agentCatalogId);
+    if (ids.length === 0) return [];
+    const all = await this.listMcpServers();
+    const idSet = new Set(ids);
+    return all.filter((s) => idSet.has(s.id));
+  }
+
+  async getUserMcpCredential(userId: string, mcpServerId: string): Promise<UserMcpCredential | undefined> {
+    const [row] = await db
+      .select()
+      .from(userMcpCredentials)
+      .where(and(eq(userMcpCredentials.userId, userId), eq(userMcpCredentials.mcpServerId, mcpServerId)));
+    return row;
+  }
+
+  async getUserMcpCredentialByToken(proxyToken: string): Promise<UserMcpCredential | undefined> {
+    const [row] = await db.select().from(userMcpCredentials).where(eq(userMcpCredentials.proxyToken, proxyToken));
+    return row;
+  }
+
+  async listUserMcpCredentials(userId: string): Promise<UserMcpCredential[]> {
+    return db.select().from(userMcpCredentials).where(eq(userMcpCredentials.userId, userId));
+  }
+
+  async upsertUserMcpCredential(userId: string, mcpServerId: string, encryptedKey: string): Promise<UserMcpCredential> {
+    const existing = await this.getUserMcpCredential(userId, mcpServerId);
+    if (existing) {
+      const [row] = await db
+        .update(userMcpCredentials)
+        .set({ encryptedKey, updatedAt: new Date() })
+        .where(eq(userMcpCredentials.id, existing.id))
+        .returning();
+      return row;
+    }
+    const proxyToken = randomBytes(24).toString("hex");
+    const [row] = await db
+      .insert(userMcpCredentials)
+      .values({ userId, mcpServerId, proxyToken, encryptedKey })
+      .returning();
+    return row;
+  }
+
+  async deleteUserMcpCredential(userId: string, mcpServerId: string): Promise<void> {
+    await db
+      .delete(userMcpCredentials)
+      .where(and(eq(userMcpCredentials.userId, userId), eq(userMcpCredentials.mcpServerId, mcpServerId)));
+  }
+
+  async listRestaurantPlatformConnections(restaurantId: string): Promise<RestaurantPlatformConnection[]> {
     return db
       .select()
-      .from(channelBindings)
-      .where(
-        and(
-          eq(channelBindings.agentId, agentId),
-          eq(channelBindings.userId, userId),
-          eq(channelBindings.active, true),
-        )
-      );
+      .from(restaurantPlatformConnections)
+      .where(eq(restaurantPlatformConnections.restaurantId, restaurantId));
   }
 
-  async deleteChannelBinding(userId: string, restaurantId: string, agentId: string, channelType: string): Promise<void> {
-    await db
-      .delete(channelBindings)
-      .where(
-        and(
-          eq(channelBindings.userId, userId),
-          eq(channelBindings.restaurantId, restaurantId),
-          eq(channelBindings.agentId, agentId),
-          eq(channelBindings.channelType, channelType),
-        )
-      );
+  async upsertRestaurantPlatformConnection(
+    restaurantId: string,
+    platform: string,
+    patch: { method: string; apiKeyEncrypted?: string | null; connected: boolean },
+  ): Promise<RestaurantPlatformConnection> {
+    const [existing] = await db
+      .select()
+      .from(restaurantPlatformConnections)
+      .where(and(
+        eq(restaurantPlatformConnections.restaurantId, restaurantId),
+        eq(restaurantPlatformConnections.platform, platform),
+      ));
+    if (existing) {
+      const [row] = await db
+        .update(restaurantPlatformConnections)
+        .set({ ...patch, updatedAt: new Date() })
+        .where(eq(restaurantPlatformConnections.id, existing.id))
+        .returning();
+      return row;
+    }
+    const [row] = await db
+      .insert(restaurantPlatformConnections)
+      .values({ restaurantId, platform, ...patch })
+      .returning();
+    return row;
   }
 }
 

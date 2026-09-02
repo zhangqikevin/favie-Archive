@@ -18,29 +18,23 @@ import {
 } from "./ubereats-api";
 import { syncOpencrawAgent, callOpenclaw } from "./openclaw";
 import { getEffectiveOpenclawConfig, DEFAULT_OPENCLAW_BASE_URL, maskApiKey } from "./openclaw-config";
-import { getChannelHandler } from "./channels/index";
+import { chatWithAgentSlot, chatWithCatalogKeyUnchecked, NotEntitledError } from "./zoowork-agent";
+import { getEntitledSlotKeys } from "./agent-entitlements";
+import { registerAdminRoutes } from "./admin-routes";
+import { registerMcpProxyRoutes } from "./mcp-proxy";
+import { ensurePreviewUser, ensureFavieDataMcpServer } from "./zoowork-admin";
+import { encryptSecret } from "./crypto";
 import { getLogs } from "./log-buffer";
-import {
-  startCapture,
-  setExpectedKey,
-  getCaptures,
-  getCaptureSummary,
-  type CronWebhookCapture,
-} from "./cron-webhook-debug";
+import * as zwChannels from "./zoowork-channels";
+import { ChannelApiError } from "./zoowork-channels";
+import cron from "node-cron";
 
 // Default config values (used when system_config entries are not set)
 const DEFAULT_APP_BASE_URL = "https://favieai.replit.app";
-import * as wechat from "./channels/wechat";
-import { startPolling, stopPolling, restoreAllPollers } from "./wechat-poller";
-import { getWhatsAppManager } from "./whatsapp-manager";
-import { IM_CHANNEL_TYPES } from "./channels/index";
-import cron from "node-cron";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-// Re-export for use within routes.ts
 import { withDeliveryInstructions } from "./delivery-instructions";
-export { withDeliveryInstructions };
 
 // ─── Shared Memory Sync ────────────────────────────────────────────────────────
 
@@ -123,10 +117,6 @@ async function triggerExpertOnboarding(
   restaurant: { id: string; name: string; address: string; rating: string | null; reviewCount: number | null },
   cfg: Record<string, string>,
 ): Promise<void> {
-  const { baseUrl, apiKey } = await getEffectiveOpenclawConfig(userId);
-  if (!baseUrl || !apiKey) return;
-  const appBaseUrl = cfg["app_base_url"] || DEFAULT_APP_BASE_URL;
-
   const ratingLine = restaurant.rating
     ? `Current rating: ${restaurant.rating}${restaurant.reviewCount ? ` (${restaurant.reviewCount} reviews)` : ""}.`
     : "No rating data yet.";
@@ -144,23 +134,11 @@ Cover these areas in your questions:
 
 Be warm and concise. Do NOT explain what you will do after they answer — just ask. Reply in the same language the user is likely to use based on the restaurant's location.`;
 
-  // Initialize the agent on openclaw (creates it + writes SOUL.md on first use)
-  const ocAgentId = await syncOpencrawAgent(
-    userId, restaurant.id, "expert",
-    restaurant.name, "", systemPrompt,
-    { baseUrl, apiKey, appBaseUrl },
-  );
-
   let text: string;
   try {
-    text = await callOpenclaw(
-      baseUrl, apiKey, ocAgentId, `${userId}-expert-onboard`,
-      systemPrompt,
-      [{ role: "user", content: "Start." }],
-      400,
-    );
+    ({ text } = await chatWithCatalogKeyUnchecked(userId, "expert", `${systemPrompt}\n\nStart.`));
   } catch (e: any) {
-    console.warn("[expert-onboard] callOpenclaw failed:", e.message);
+    console.warn("[expert-onboard] chatWithCatalogKeyUnchecked failed:", e.message);
     return;
   }
 
@@ -183,6 +161,21 @@ export async function registerRoutes(
   httpServer: Server,
   app: Express,
 ): Promise<Server> {
+
+  registerAdminRoutes(app);
+  registerMcpProxyRoutes(app);
+
+  // Seed the first System Admin account if none exists yet.
+  storage.countAdminUsers().then(async (count) => {
+    if (count > 0) return;
+    const email = process.env.SYSADMIN_EMAIL || "admin@favie.local";
+    const password = process.env.SYSADMIN_PASSWORD || "favie-admin-dev";
+    await storage.createAdminUser({ email, password: hashPassword(password) });
+    console.log(`[sysadmin] seeded first admin account: ${email}`);
+  }).catch((e) => console.error("Admin seed error:", e));
+
+  ensurePreviewUser().catch((e) => console.error("Preview user seed error:", e));
+  ensureFavieDataMcpServer().catch((e) => console.error("FavieData MCP server seed error:", e));
 
   // Seed task definitions on startup
   storage.seedTaskDefinitions(TASK_SEED).catch((e) =>
@@ -455,44 +448,35 @@ export async function registerRoutes(
         lastRole: lastMsg?.role,
         lastPreview: lastMsg?.content?.slice(0, 200) ?? "",
       }));
-      const restaurants = await storage.getRestaurants(userId);
-      const currentRestaurant = restaurants.find(r => r.id === req.user!.currentRestaurantId) ?? restaurants[0];
-      const restaurantId = currentRestaurant?.id ?? "default";
-      const restaurant = currentRestaurant
-        ? { name: currentRestaurant.name, cuisine: currentRestaurant.cuisine ?? null, address: currentRestaurant.address ?? null, rating: currentRestaurant.rating ?? null, reviewCount: currentRestaurant.reviewCount ?? null }
-        : { name: "your restaurant", cuisine: null as string | null, address: null, rating: null, reviewCount: null };
-
-      const cfg = await storage.getSystemConfig();
-      if (cfg[`agent_${agentId}_enabled`] === "false") {
-        return res.status(403).json({ message: "This agent is currently disabled." });
-      }
-      const overrides = {
-        role:  cfg[`agent_${agentId}_role`]  || undefined,
-        rules: cfg[`agent_${agentId}_rules`] || undefined,
-      };
-      const systemPrompt = getAgentSystemPrompt(agentId as AgentId, restaurant, overrides, userId);
-
-      const oc = await getEffectiveOpenclawConfig(userId);
-      const appBaseUrl = cfg["app_base_url"] || DEFAULT_APP_BASE_URL;
-      const ocId = await syncOpencrawAgent(userId, restaurantId, agentId, restaurant.name, restaurant.cuisine ?? "", systemPrompt, { ...oc, appBaseUrl });
-      const enrichedPrompt = withDeliveryInstructions(systemPrompt, userId, agentId, appBaseUrl, oc.apiKey);
-      const text = await callOpenclaw(
-        oc.baseUrl,
-        oc.apiKey,
-        ocId,
-        userId,
-        enrichedPrompt,
-        messages,
-        2048,
-      );
-      res.json({ text });
+      // Each agent tab is synced to its own ZooWork agent instance, gated by the
+      // user's subscription (see server/zoowork-agent.ts, server/agent-entitlements.ts).
+      const { text, steps } = await chatWithAgentSlot(userId, agentId, lastMsg!.content);
+      res.json({ text, steps });
     } catch (err: any) {
       if (err?.name === "ZodError") {
         return res
           .status(400)
           .json({ message: err.errors[0]?.message || "Invalid request" });
       }
+      if (err instanceof NotEntitledError) {
+        return res.status(403).json({ message: err.message });
+      }
       console.error("[chat-api] error:", err?.stack ?? err?.message ?? JSON.stringify(err));
+      res.status(500).json({ message: err.message || "Internal server error" });
+    }
+  });
+
+  // GET /api/agent/my-agents — which of the 7 agent tabs this user's subscription
+  // actually entitles them to; drives the sidebar's agent list.
+  app.get("/api/agent/my-agents", async (req, res) => {
+    if (!req.isAuthenticated() || !req.user) {
+      return res.status(401).json({ message: "Not authenticated" });
+    }
+    try {
+      const slots = await getEntitledSlotKeys(req.user.id);
+      res.json({ slots });
+    } catch (err: any) {
+      console.error("[agent-api] my-agents error:", err?.stack ?? err?.message ?? JSON.stringify(err));
       res.status(500).json({ message: err.message || "Internal server error" });
     }
   });
@@ -564,6 +548,193 @@ export async function registerRoutes(
       res.json({ ok: true });
     } catch (err: any) {
       res.status(400).json({ message: err.message || "Invalid request" });
+    }
+  });
+
+  // GET /api/mcp/available — MCP servers offered by the "general" agent template,
+  // with whether the current user has already connected each one.
+  app.get("/api/mcp/available", async (req, res) => {
+    if (!req.isAuthenticated() || !req.user) {
+      return res.status(401).json({ message: "Not authenticated" });
+    }
+    try {
+      const entry = await storage.getAgentCatalogByKey("general");
+      if (!entry) return res.json({ mcpServers: [] });
+      const servers = await storage.getMcpServersForAgent(entry.id);
+      const creds = await storage.listUserMcpCredentials(req.user.id);
+      const connectedIds = new Set(creds.map((c) => c.mcpServerId));
+      res.json({
+        mcpServers: servers.map((s) => ({
+          id: s.id, key: s.key, name: s.name, description: s.description,
+          connected: connectedIds.has(s.id),
+        })),
+      });
+    } catch (err: any) {
+      res.status(500).json({ message: err.message || "Failed to list MCP servers" });
+    }
+  });
+
+  // POST /api/mcp/connect — save the current user's own key for one MCP server.
+  // Encrypted at rest; never echoed back.
+  app.post("/api/mcp/connect", async (req, res) => {
+    if (!req.isAuthenticated() || !req.user) {
+      return res.status(401).json({ message: "Not authenticated" });
+    }
+    try {
+      const { mcpServerId, apiKey } = z
+        .object({ mcpServerId: z.string().min(1), apiKey: z.string().min(1) })
+        .parse(req.body);
+      const server = await storage.getMcpServer(mcpServerId);
+      if (!server) return res.status(404).json({ message: "MCP server not found" });
+      await storage.upsertUserMcpCredential(req.user.id, mcpServerId, encryptSecret(apiKey));
+      res.json({ ok: true });
+    } catch (err: any) {
+      if (err?.name === "ZodError") return res.status(400).json({ message: err.errors[0]?.message || "Invalid input" });
+      res.status(400).json({ message: err.message || "Invalid request" });
+    }
+  });
+
+  // DELETE /api/mcp/connect/:mcpServerId — disconnect (removes the stored key).
+  app.delete("/api/mcp/connect/:mcpServerId", async (req, res) => {
+    if (!req.isAuthenticated() || !req.user) {
+      return res.status(401).json({ message: "Not authenticated" });
+    }
+    await storage.deleteUserMcpCredential(req.user.id, req.params.mcpServerId);
+    res.json({ ok: true });
+  });
+
+  // ── Restaurant onboarding wizard ────────────────────────────────────────
+  // Step 1 reuses POST /api/restaurants (already existed). Steps 2 and 3 live
+  // here. "At least one connected platform" is the gate out of step 2; the
+  // Favie AI Key in step 3 is just this user's MCP credential for the
+  // FavieData server (see zoowork-admin.ts), so agents can use it later.
+
+  const PERMISSION_PLATFORMS = ["ubereats", "doordash", "chowbus", "menusifu"] as const;
+  const API_KEY_PLATFORMS = ["toast", "square"] as const;
+  const ALL_PLATFORMS = [...PERMISSION_PLATFORMS, ...API_KEY_PLATFORMS] as const;
+  type OnboardingPlatform = (typeof ALL_PLATFORMS)[number];
+
+  app.get("/api/onboarding/status", async (req, res) => {
+    if (!req.isAuthenticated() || !req.user) {
+      return res.status(401).json({ message: "Not authenticated" });
+    }
+    try {
+      const restaurants = await storage.getRestaurants(req.user.id);
+      const restaurant = restaurants.find((r) => r.id === req.user!.currentRestaurantId) ?? restaurants[0] ?? null;
+
+      let platforms: Record<string, { connected: boolean; hasApiKey: boolean }> = {};
+      for (const p of ALL_PLATFORMS) platforms[p] = { connected: false, hasApiKey: false };
+
+      if (restaurant) {
+        const rows = await storage.listRestaurantPlatformConnections(restaurant.id);
+        for (const row of rows) {
+          platforms[row.platform] = { connected: row.connected, hasApiKey: !!row.apiKeyEncrypted };
+        }
+      }
+
+      const step2Complete = Object.values(platforms).some((p) => p.connected);
+
+      const favieDataServerId = await ensureFavieDataMcpServer();
+      const favieCred = await storage.getUserMcpCredential(req.user.id, favieDataServerId);
+
+      res.json({
+        restaurant: restaurant ? { id: restaurant.id, name: restaurant.name, address: restaurant.address } : null,
+        platforms,
+        step2Complete,
+        favieKeyConnected: !!favieCred,
+      });
+    } catch (err: any) {
+      res.status(500).json({ message: err.message || "Failed to load onboarding status" });
+    }
+  });
+
+  app.post("/api/onboarding/platform/:platform/verify", async (req, res) => {
+    if (!req.isAuthenticated() || !req.user) {
+      return res.status(401).json({ message: "Not authenticated" });
+    }
+    try {
+      const { platform } = z.object({ platform: z.enum(PERMISSION_PLATFORMS) }).parse(req.params);
+      const restaurants = await storage.getRestaurants(req.user.id);
+      const restaurant = restaurants.find((r) => r.id === req.user!.currentRestaurantId) ?? restaurants[0];
+      if (!restaurant) return res.status(400).json({ message: "Create a restaurant first" });
+
+      // Mocked: real verification (checking UberEats/DoorDash/Chowbus/MenuSifu
+      // for the restaurants@zoowork.ai grant) comes later. Always succeeds today.
+      const row = await storage.upsertRestaurantPlatformConnection(restaurant.id, platform, {
+        method: "permission",
+        connected: true,
+      });
+      res.json({ connected: row.connected });
+    } catch (err: any) {
+      if (err?.name === "ZodError") return res.status(400).json({ message: "Unknown platform" });
+      res.status(500).json({ message: err.message || "Verification failed" });
+    }
+  });
+
+  app.post("/api/onboarding/platform/:platform/api-key", async (req, res) => {
+    if (!req.isAuthenticated() || !req.user) {
+      return res.status(401).json({ message: "Not authenticated" });
+    }
+    try {
+      const { platform } = z.object({ platform: z.enum(API_KEY_PLATFORMS) }).parse(req.params);
+      const { apiKey } = z.object({ apiKey: z.string().min(1) }).parse(req.body);
+      const restaurants = await storage.getRestaurants(req.user.id);
+      const restaurant = restaurants.find((r) => r.id === req.user!.currentRestaurantId) ?? restaurants[0];
+      if (!restaurant) return res.status(400).json({ message: "Create a restaurant first" });
+
+      const row = await storage.upsertRestaurantPlatformConnection(restaurant.id, platform, {
+        method: "api_key",
+        apiKeyEncrypted: encryptSecret(apiKey),
+        connected: true,
+      });
+      res.json({ connected: row.connected });
+    } catch (err: any) {
+      if (err?.name === "ZodError") return res.status(400).json({ message: err.errors?.[0]?.message || "Invalid input" });
+      res.status(500).json({ message: err.message || "Failed to save API key" });
+    }
+  });
+
+  app.delete("/api/onboarding/platform/:platform", async (req, res) => {
+    if (!req.isAuthenticated() || !req.user) {
+      return res.status(401).json({ message: "Not authenticated" });
+    }
+    try {
+      const { platform } = z.object({ platform: z.enum(ALL_PLATFORMS) }).parse(req.params);
+      const restaurants = await storage.getRestaurants(req.user.id);
+      const restaurant = restaurants.find((r) => r.id === req.user!.currentRestaurantId) ?? restaurants[0];
+      if (!restaurant) return res.status(400).json({ message: "Create a restaurant first" });
+      const method: "permission" | "api_key" = (PERMISSION_PLATFORMS as readonly string[]).includes(platform) ? "permission" : "api_key";
+      await storage.upsertRestaurantPlatformConnection(restaurant.id, platform, { method, apiKeyEncrypted: null, connected: false });
+      res.json({ ok: true });
+    } catch (err: any) {
+      res.status(400).json({ message: err.message || "Invalid request" });
+    }
+  });
+
+  // POST /api/onboarding/favie-key — validates + stores the Favie AI Key emailed
+  // to the customer once Favie's own data pipeline finishes syncing their orders.
+  // Stored as this user's MCP credential for the FavieData server (see
+  // zoowork-admin.ts) so any agent bound to it can use it later.
+  app.post("/api/onboarding/favie-key", async (req, res) => {
+    if (!req.isAuthenticated() || !req.user) {
+      return res.status(401).json({ message: "Not authenticated" });
+    }
+    try {
+      const { apiKey } = z.object({ apiKey: z.string().min(1) }).parse(req.body);
+
+      // Mocked: real validation (key correctness + "has the data pull finished")
+      // comes later, once Favie's data backend exists. A short key is treated as
+      // obviously wrong so the mock isn't a rubber stamp on empty input.
+      if (apiKey.trim().length < 8) {
+        return res.status(400).json({ valid: false, message: "That doesn't look like a valid Favie AI Key." });
+      }
+
+      const favieDataServerId = await ensureFavieDataMcpServer();
+      await storage.upsertUserMcpCredential(req.user.id, favieDataServerId, encryptSecret(apiKey));
+      res.json({ valid: true, dataSyncComplete: true });
+    } catch (err: any) {
+      if (err?.name === "ZodError") return res.status(400).json({ message: err.errors?.[0]?.message || "Invalid input" });
+      res.status(500).json({ message: err.message || "Failed to validate key" });
     }
   });
 
@@ -1175,6 +1346,107 @@ Create a full negotiation package: market analysis, leverage assessment, specifi
     }
   });
 
+  // ─── Agent Market ──────────────────────────────────────────────────────────
+  // Storefront for agentCatalog entries a sysadmin has flagged as individually
+  // purchasable (visible + priced, and not already bundled into a package —
+  // bundled agents come with a package subscription instead, see
+  // sysadmin/products.tsx "可单独购买" column).
+
+  // GET /api/agent-market — list agents purchasable à la carte, with the
+  // current user's ownership status for each
+  app.get("/api/agent-market", async (req, res) => {
+    if (!req.isAuthenticated() || !req.user) {
+      return res.status(401).json({ message: "Not authenticated" });
+    }
+    try {
+      const [catalog, packages, subscription] = await Promise.all([
+        storage.listAgentCatalog(),
+        storage.listAgentPackages(),
+        storage.getSubscriptionByUser(req.user.id),
+      ]);
+      const bundledAgentIds = new Set(
+        (await Promise.all(packages.map((p) => storage.getAgentPackageItemIds(p.id)))).flat(),
+      );
+      const ownedAgentIds = new Set(subscription?.addonAgentIds ?? []);
+      const agents = catalog
+        .filter((a) => a.visible && a.individualPriceCents > 0 && !bundledAgentIds.has(a.id))
+        .map((a) => ({
+          id: a.id,
+          key: a.key,
+          name: a.name,
+          description: a.description,
+          model: a.model,
+          individualPriceCents: a.individualPriceCents,
+          owned: ownedAgentIds.has(a.id),
+        }));
+      res.json({ agents });
+    } catch (err: any) {
+      console.error("Agent market fetch error:", err);
+      res.status(500).json({ message: err.message || "Internal server error" });
+    }
+  });
+
+  // POST /api/agent-market/purchase — buy one à la carte agent. There's no
+  // live payment gateway yet, so this mirrors the sysadmin
+  // /api/sysadmin/payments/simulate mock: an "initiated" payment record then
+  // a "succeeded" one — then grants the agent via subscriptions.addonAgentIds.
+  app.post("/api/agent-market/purchase", async (req, res) => {
+    if (!req.isAuthenticated() || !req.user) {
+      return res.status(401).json({ message: "Not authenticated" });
+    }
+    try {
+      const { agentId } = z.object({ agentId: z.string().min(1) }).parse(req.body);
+
+      const agent = await storage.getAgentCatalogById(agentId);
+      if (!agent) return res.status(404).json({ message: "Agent not found" });
+
+      const packages = await storage.listAgentPackages();
+      const bundledAgentIds = new Set(
+        (await Promise.all(packages.map((p) => storage.getAgentPackageItemIds(p.id)))).flat(),
+      );
+      if (!agent.visible || agent.individualPriceCents <= 0 || bundledAgentIds.has(agent.id)) {
+        return res.status(400).json({ message: "This agent is not available for individual purchase" });
+      }
+
+      const subscription = await storage.getSubscriptionByUser(req.user.id);
+      const ownedAgentIds: string[] = subscription?.addonAgentIds ?? [];
+      if (ownedAgentIds.includes(agent.id)) {
+        return res.status(400).json({ message: "You already own this agent" });
+      }
+
+      await storage.createPaymentRecord({
+        userId: req.user.id,
+        kind: "addon_purchase",
+        packageId: null,
+        agentId: agent.id,
+        amountCents: agent.individualPriceCents,
+        status: "initiated",
+        failureReason: null,
+      });
+      const payment = await storage.createPaymentRecord({
+        userId: req.user.id,
+        kind: "addon_purchase",
+        packageId: null,
+        agentId: agent.id,
+        amountCents: agent.individualPriceCents,
+        status: "succeeded",
+        failureReason: null,
+      });
+
+      const newSubscription = await storage.upsertSubscription(req.user.id, {
+        packageId: subscription?.packageId ?? null,
+        addonAgentIds: [...ownedAgentIds, agent.id],
+        status: subscription?.status ?? "active",
+      });
+
+      res.status(201).json({ payment, subscription: newSubscription });
+    } catch (err: any) {
+      if (err?.name === "ZodError") return res.status(400).json({ message: err.errors[0]?.message || "Invalid input" });
+      console.error("Agent market purchase error:", err);
+      res.status(500).json({ message: err.message || "Internal server error" });
+    }
+  });
+
   // ─── UberEats OAuth & API ──────────────────────────────────────────────────
 
   // GET /api/ubereats/redirect-uri — return the exact redirect URI to register in UberEats dev portal
@@ -1569,514 +1841,106 @@ Create a full negotiation package: market analysis, leverage assessment, specifi
     }
   });
 
-  // ─── WeChat QR Login ────────────────────────────────────────────────────────
+  // ─── ZooWork channel binding (feishu / slack / wecom / weixin) ───────────────
+  // See server/zoowork-channels.ts. Once bound, ZooWork itself owns the
+  // conversation on that platform — there is no webhook to receive here.
 
-  app.post("/api/channel/wechat/init-login", async (req, res) => {
-    if (!req.isAuthenticated() || !req.user) return res.status(401).json({ message: "Not authenticated" });
-    try {
-      const { qrcodeId, imgContent } = await wechat.getQrCode();
-      // imgContent is the WeChat URL to encode — generate a QR code PNG (base64)
-      const qrDataUrl = await QRCode.toDataURL(imgContent, { width: 256, margin: 2 });
-      // Strip the "data:image/png;base64," prefix so frontend handles it uniformly
-      const qrBase64 = qrDataUrl.replace(/^data:image\/png;base64,/, "");
-      res.json({ qrcodeId, imgContent: qrBase64 });
-    } catch (e: any) {
-      res.status(500).json({ message: e.message });
-    }
-  });
-
-  app.get("/api/channel/wechat/login-status/:qrcodeId", async (req, res) => {
-    if (!req.isAuthenticated() || !req.user) return res.status(401).json({ message: "Not authenticated" });
-    // Disable ETag/304 for this poll endpoint — apiRequest treats !res.ok (incl. 304)
-    // as failure, and that causes the poll loop to throw spuriously when express
-    // returns 304 for repeated identical {"status":"pending"} responses.
-    res.set("Cache-Control", "no-store, no-cache, must-revalidate");
-    res.set("Pragma", "no-cache");
-    res.set("Expires", "0");
-    try {
-      const result = await wechat.checkQrStatus(req.params.qrcodeId);
-      res.json(result);
-    } catch (e: any) {
-      res.status(500).json({ message: e.message });
-    }
-  });
-
-  // ─── WhatsApp QR Login ──────────────────────────────────────────────────────
-
-  app.post("/api/channel/whatsapp/init-login", async (req, res) => {
-    if (!req.isAuthenticated() || !req.user) return res.status(401).json({ message: "Not authenticated" });
-    try {
-      const waMgr = getWhatsAppManager();
-      const { sessionId, qr } = await waMgr.startLogin();
-      // Generate QR code as base64 PNG for frontend display
-      const qrDataUrl = await QRCode.toDataURL(qr, { width: 256, margin: 2 });
-      const qrBase64 = qrDataUrl.replace(/^data:image\/png;base64,/, "");
-      res.json({ sessionId, imgContent: qrBase64 });
-    } catch (e: any) {
-      res.status(500).json({ message: e.message });
-    }
-  });
-
-  app.get("/api/channel/whatsapp/login-status/:sessionId", async (req, res) => {
-    if (!req.isAuthenticated() || !req.user) return res.status(401).json({ message: "Not authenticated" });
-    res.set("Cache-Control", "no-store, no-cache, must-revalidate");
-    res.set("Pragma", "no-cache");
-    res.set("Expires", "0");
-    try {
-      const waMgr = getWhatsAppManager();
-      const status = waMgr.getLoginStatus(req.params.sessionId);
-      if (!status) return res.status(404).json({ message: "Session not found" });
-      // If QR refreshed, generate new image
-      let imgContent: string | undefined;
-      if (status.qr && status.status === "pending") {
-        const qrDataUrl = await QRCode.toDataURL(status.qr, { width: 256, margin: 2 });
-        imgContent = qrDataUrl.replace(/^data:image\/png;base64,/, "");
-      }
-      res.json({ status: status.status, imgContent, error: status.error });
-    } catch (e: any) {
-      res.status(500).json({ message: e.message });
-    }
-  });
-
-  // ─── Channel Binding API ────────────────────────────────────────────────────
-
-  // GET all channel bindings for an agent (for sidebar display)
-  app.get("/api/channel/bindings/:agentId", async (req, res) => {
-    if (!req.isAuthenticated() || !req.user) return res.status(401).json({ message: "Not authenticated" });
-    const { agentId } = req.params;
-    const restaurants2 = await storage.getRestaurants(req.user.id);
-    const current = restaurants2.find(r => r.id === req.user!.currentRestaurantId) ?? restaurants2[0];
-    const restaurantId = current?.id ?? "default";
-    const bindings = await storage.getChannelBindings(req.user.id, restaurantId, agentId);
-    res.json(bindings);
-  });
-
-  // GET single binding for a channel type
-  app.get("/api/channel/:channelType/binding/:agentId", async (req, res) => {
-    if (!req.isAuthenticated() || !req.user) return res.status(401).json({ message: "Not authenticated" });
-    const { channelType, agentId } = req.params;
-    const restaurants2 = await storage.getRestaurants(req.user.id);
-    const current = restaurants2.find(r => r.id === req.user!.currentRestaurantId) ?? restaurants2[0];
-    const restaurantId = current?.id ?? "default";
-    const binding = await storage.getChannelBinding(req.user.id, restaurantId, agentId, channelType);
-    res.json(binding ?? null);
-  });
-
-  // POST connect a channel
-  app.post("/api/channel/:channelType/binding/:agentId", async (req, res) => {
-    if (!req.isAuthenticated() || !req.user) return res.status(401).json({ message: "Not authenticated" });
-    try {
-      const { channelType, agentId } = req.params;
-      const restaurants2 = await storage.getRestaurants(req.user.id);
-      const current = restaurants2.find(r => r.id === req.user!.currentRestaurantId) ?? restaurants2[0];
-      const restaurantId = current?.id ?? "default";
-
-      const handler = getChannelHandler(channelType);
-      if (!handler) return res.status(400).json({ message: `Unknown channel type: ${channelType}` });
-
-      const cfg = await storage.getSystemConfig();
-      const config = req.body as Record<string, string>;
-      let mergedConfig = { ...config };
-
-      // ── Single IM channel enforcement ──
-      // telegram, wechat, whatsapp are mutually exclusive — disconnect any existing IM binding
-      if ((IM_CHANNEL_TYPES as readonly string[]).includes(channelType)) {
-        const waMgr = getWhatsAppManager();
-        for (const imType of IM_CHANNEL_TYPES) {
-          const oldIds = await storage.deleteAllChannelBindingsByTypeAndUser(req.user.id, imType);
-          for (const id of oldIds) {
-            if (imType === "wechat") stopPolling(id);
-            if (imType === "whatsapp") { waMgr.stopConnection(id); waMgr.cleanupAuth(id); }
-          }
-        }
-      }
-
-      if (channelType === "wechat") {
-        // WeChat uses polling, not webhooks — validate token and start poller
-        try {
-          await handler.registerWebhook("", config as any);
-        } catch (e: any) {
-          return res.status(400).json({ message: `WeChat token invalid: ${e.message}` });
-        }
-      } else if (channelType === "whatsapp") {
-        // WhatsApp uses Baileys WebSocket — finalize login session and start connection
-        const sessionId = config.sessionId;
-        if (!sessionId) return res.status(400).json({ message: "Missing sessionId" });
-        // Save binding first to get the ID, then finalize login + start connection
-      } else {
-        // Webhook-based channels (Telegram) need an app base URL
-        const appBaseUrl = (cfg["app_base_url"] || "").replace(/\/$/, "");
-        if (!appBaseUrl) {
-          return res.status(400).json({ message: "Please set App Base URL in System Config first (e.g. your Cloudflare tunnel URL)." });
-        }
-        const webhookUrl = `${appBaseUrl}/api/channel/${channelType}/webhook/${config.botToken}`;
-        try {
-          const { botUsername } = await handler.registerWebhook(webhookUrl, config as any);
-          mergedConfig = { ...config, botUsername };
-        } catch (e: any) {
-          console.error("[channel] registerWebhook error:", e.message);
-          // Don't block binding save if webhook registration fails
-        }
-      }
-
-      const binding = await storage.saveChannelBinding({
-        userId: req.user.id,
-        restaurantId,
-        agentId,
-        channelType,
-        channelConfig: mergedConfig,
-        active: true,
-      });
-
-      if (channelType === "wechat") startPolling(binding.id);
-      if (channelType === "whatsapp") {
-        const waMgr = getWhatsAppManager();
-        await waMgr.finalizeLogin(config.sessionId, binding.id);
-        await waMgr.startConnection(binding.id);
-      }
-
-      res.json(binding);
-    } catch (err: any) {
-      res.status(500).json({ message: err.message || "Internal server error" });
-    }
-  });
-
-  // DELETE disconnect a channel
-  app.delete("/api/channel/:channelType/binding/:agentId", async (req, res) => {
-    if (!req.isAuthenticated() || !req.user) return res.status(401).json({ message: "Not authenticated" });
-    const { channelType, agentId } = req.params;
-    const restaurants2 = await storage.getRestaurants(req.user.id);
-    const current = restaurants2.find(r => r.id === req.user!.currentRestaurantId) ?? restaurants2[0];
-    const restaurantId = current?.id ?? "default";
-    // Stop connection before deleting
-    const existing = await storage.getChannelBinding(req.user.id, restaurantId, agentId, channelType);
-    if (existing) {
-      if (channelType === "wechat") stopPolling(existing.id);
-      if (channelType === "whatsapp") {
-        const waMgr = getWhatsAppManager();
-        waMgr.stopConnection(existing.id);
-        waMgr.cleanupAuth(existing.id);
-      }
-    }
-    await storage.deleteChannelBinding(req.user.id, restaurantId, agentId, channelType);
-    res.json({ ok: true });
-  });
-
-  // POST channel webhook — handles incoming messages from IM platforms
-  app.post("/api/channel/:channelType/webhook/:token", async (req, res) => {
-    res.json({ ok: true }); // Respond immediately so Telegram doesn't retry
-    const { channelType, token } = req.params;
-    const whStart = Date.now();
-    try {
-      const handler = getChannelHandler(channelType);
-      if (!handler) {
-        console.warn(`[channel webhook] no handler for ${channelType}`);
-        return;
-      }
-
-      const incoming = handler.parseIncoming(req);
-      if (!incoming) {
-        console.log(`[channel webhook] ${channelType} parseIncoming returned null (non-message event)`);
-        return;
-      }
-
-      const binding = await storage.getChannelBindingByToken(channelType, token);
-
-      if (!binding) {
-        console.warn(`[channel webhook] no binding found for ${channelType} token=${token.slice(0, 8)}...`);
-        return;
-      }
-      console.log(`[channel webhook] ${channelType} incoming`, JSON.stringify({
-        bindingId: binding.id,
-        userTail: binding.userId.slice(-8),
-        agentId: binding.agentId,
-        chatIdTail: incoming.chatId.slice(-8),
-        textLen: incoming.text.length,
-        textPreview: incoming.text.slice(0, 200),
-      }));
-
-      // Persist chatId so proactive deliver endpoint can push back to this chat
-      const channelConfigNow = binding.channelConfig as Record<string, string>;
-      if (channelConfigNow.chatId !== incoming.chatId) {
-        await storage.updateChannelBindingConfig(binding.id, { chatId: incoming.chatId });
-      }
-
-      const cfg = await storage.getSystemConfig();
-      const { agentId, userId, restaurantId } = binding;
-      const channelConfig = { ...channelConfigNow, chatId: incoming.chatId };
-
-      if (cfg[`agent_${agentId}_enabled`] === "false") return;
-
-      // Load restaurant
-      const allRestaurants = await storage.getRestaurants(userId);
-      const restaurant = allRestaurants.find(r => r.id === restaurantId) ?? allRestaurants[0];
-      const restaurantInfo = restaurant
-        ? { name: restaurant.name, cuisine: restaurant.cuisine ?? null, address: restaurant.address ?? null, rating: restaurant.rating ?? null, reviewCount: restaurant.reviewCount ?? null }
-        : { name: "your restaurant", cuisine: null, address: null, rating: null, reviewCount: null };
-
-      // Build system prompt
-      const overrides = {
-        role:  cfg[`agent_${agentId}_role`]  || undefined,
-        rules: cfg[`agent_${agentId}_rules`] || undefined,
-      };
-      const systemPrompt = getAgentSystemPrompt(agentId as AgentId, restaurantInfo, overrides, userId);
-
-      // Load last 20 messages from history
-      const { messages: history } = await storage.getChatHistory(userId, agentId);
-      const historyMessages = history.slice(-20).map(m => ({ role: m.role === "ai" ? "assistant" : m.role, content: m.text }));
-
-      // Add incoming user message
-      const allMessages = [...historyMessages, { role: "user" as const, content: incoming.text }];
-
-      // Call openclaw
-      const oc = await getEffectiveOpenclawConfig(userId);
-      const appBaseUrl = cfg["app_base_url"] || DEFAULT_APP_BASE_URL;
-      const ocId = await syncOpencrawAgent(userId, restaurantId, agentId, restaurantInfo.name, restaurantInfo.cuisine ?? "", systemPrompt, { ...oc, appBaseUrl });
-      const enrichedPromptTg = withDeliveryInstructions(systemPrompt, userId, agentId, appBaseUrl, oc.apiKey);
-      const replyText = await callOpenclaw(
-        oc.baseUrl,
-        oc.apiKey,
-        ocId,
-        userId,
-        enrichedPromptTg,
-        allMessages,
-        2048,
-      );
-      console.log(`[channel webhook] ${channelType} reply ready`, JSON.stringify({
-        bindingId: binding.id,
-        elapsedMs: Date.now() - whStart,
-        replyLen: replyText.length,
-        replyPreview: replyText.slice(0, 200),
-      }));
-
-      // Save both turns
-      const ts = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-      await storage.saveChatMessages([
-        { userId, agentId, role: "user",      text: incoming.text, ts },
-        { userId, agentId, role: "ai",        text: replyText,     ts },
-      ]);
-
-      // Send reply back to user
-      await handler.sendMessage(incoming.chatId, replyText, channelConfig as any);
-      console.log(`[channel webhook] ${channelType} done`, JSON.stringify({ bindingId: binding.id, totalMs: Date.now() - whStart }));
-    } catch (err: any) {
-      console.error(`[channel webhook] ${channelType} error:`, err?.stack ?? err?.message ?? JSON.stringify(err));
-    }
-  });
-
-  // ─── Cron webhook delivery ──────────────────────────────────────────────────
-  // OpenClaw POSTs here when a scheduled task (reminder, cron) completes.
-  // Body format: { jobId, jobName, status, summary, error, ... }
-  //
-  // Auth is via path token: /api/openclaw/cron-webhook/:userId/:agentId/:token
-  // where :token == the user's effective openclaw API key. We use a path token
-  // (instead of an Authorization header) because openclaw's cron callbacks do
-  // NOT inject a Bearer header — capture data confirmed `hasAuthHeader: false`
-  // for every cron callback, so header-based auth would always reject.
-  //
-  // Heavily instrumented: every decision point captured to ring buffer
-  // (cron-webhook-debug.ts) and viewable via GET /api/admin/cron-debug.
-
-  async function processCronPayload(
-    cap: CronWebhookCapture,
-    userId: string,
-    agentId: string,
-    body: Record<string, unknown>,
-    t0: number,
-  ): Promise<void> {
-    console.log(`[cron-webhook] received: userId=${userId} agentId=${agentId} status=${body.status} jobName=${body.jobName} bodyKeys=${cap.bodyKeys.join(",")}`);
-
-    const text = (body.summary as string) || (body.error as string) || "";
-    cap.text = text.slice(0, 500);
-    cap.textLength = text.length;
-    if (!text.trim()) {
-      cap.decision = "empty-text";
-      cap.totalMs = Date.now() - t0;
-      console.warn(`[cron-webhook] empty text (no summary/error), skipping. bodyKeys=${cap.bodyKeys.join(",")}`);
-      return;
-    }
-
-    const ts = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    await storage.saveChatMessages([{ userId, agentId, role: "ai", text, ts }]);
-    cap.chatMessageSaved = true;
-
-    const bindings = await storage.getAllActiveChannelBindings(agentId, userId);
-    cap.bindingsFound = bindings.length;
-    console.log(`[cron-webhook] found ${bindings.length} binding(s) for userId=${userId} agentId=${agentId}`);
-    cap.decision = bindings.length === 0 ? "saved-only" : "delivered";
-
-    for (const binding of bindings) {
-      const bResult: any = {
-        channelType: binding.channelType,
-        bindingId: binding.id,
-        hasChatId: false,
-        chatIdTail: "(none)",
-        hasHandler: false,
-        sendResult: "skipped-no-handler",
-      };
-      const bStart = Date.now();
-      try {
-        const handler = getChannelHandler(binding.channelType);
-        bResult.hasHandler = !!handler;
-        if (!handler) {
-          console.warn(`[cron-webhook] no handler for ${binding.channelType}`);
-          cap.bindingResults.push(bResult);
-          continue;
-        }
-        const bCfg: Record<string, string> = { ...(binding.channelConfig as Record<string, string>), _bindingId: binding.id };
-        bResult.hasChatId = !!bCfg.chatId;
-        bResult.chatIdTail = bCfg.chatId ? bCfg.chatId.slice(-8) : "(none)";
-        if (!bCfg.chatId) {
-          bResult.sendResult = "skipped-no-chatId";
-          console.warn(`[cron-webhook] ${binding.channelType} binding=${binding.id} has no chatId — user must send first inbound message to populate it`);
-          cap.bindingResults.push(bResult);
-          continue;
-        }
-        await handler.sendMessage(bCfg.chatId, text, bCfg as any);
-        bResult.sendResult = "ok";
-        bResult.ms = Date.now() - bStart;
-        console.log(`[cron-webhook] ${binding.channelType} sendMessage OK chatIdTail=${bResult.chatIdTail} ms=${bResult.ms}`);
-      } catch (e: any) {
-        bResult.sendResult = "error";
-        bResult.errorMessage = (e?.message ?? String(e)).slice(0, 500);
-        bResult.ms = Date.now() - bStart;
-        console.error(`[cron-webhook] ${binding.channelType} sendMessage failed:`, e.message);
-      }
-      cap.bindingResults.push(bResult);
-    }
-    cap.totalMs = Date.now() - t0;
+  function channelErrorResponse(res: import("express").Response, err: any) {
+    if (err instanceof ChannelApiError) return res.status(err.status).json({ message: err.message });
+    console.error("[zoowork-channel] error:", err?.stack ?? err?.message ?? JSON.stringify(err));
+    res.status(500).json({ message: err?.message || "Internal server error" });
   }
 
-  // PRIMARY route — token in path
-  app.post("/api/openclaw/cron-webhook/:userId/:agentId/:token", async (req, res) => {
-    res.json({ ok: true });
-    const t0 = Date.now();
-    const { userId, agentId, token } = req.params;
-    const cap = startCapture("cron-webhook", req, userId, agentId);
+  app.get("/api/agent/:slot/channels", async (req, res) => {
+    if (!req.isAuthenticated() || !req.user) return res.status(401).json({ message: "Not authenticated" });
     try {
-      const { apiKey: expectedKey } = await getEffectiveOpenclawConfig(userId);
-      const trimmedKey = expectedKey.trim();
-      const pathToken = (token ?? "").trim();
-      setExpectedKey(cap, trimmedKey);
-      cap.authMatch = !!trimmedKey && pathToken === trimmedKey;
-      if (!cap.authMatch) {
-        cap.decision = "unauthorized";
-        cap.totalMs = Date.now() - t0;
-        const gotTail = pathToken.length >= 6 ? pathToken.slice(-6) : `(short, len=${pathToken.length})`;
-        console.warn(`[cron-webhook] unauthorized (path-token) userId=${userId} agentId=${agentId} expectedLen=${trimmedKey.length} expectedTail=${cap.expectedKeyTail} gotLen=${pathToken.length} gotTail=${gotTail}`);
-        return;
-      }
-      await processCronPayload(cap, userId, agentId, req.body as Record<string, unknown>, t0);
+      res.json(await zwChannels.listChannels(req.user.id, req.params.slot));
     } catch (err: any) {
-      cap.decision = "error";
-      cap.errorMessage = (err?.message ?? String(err)).slice(0, 500);
-      cap.totalMs = Date.now() - t0;
-      console.error("[cron-webhook] error:", err.message);
+      channelErrorResponse(res, err);
     }
   });
 
-  // LEGACY route — old /:userId/:agentId path (no token). Returns 410 so
-  // operators see a clear signal that the cron job needs to be recreated.
-  // Still captured to debug buffer with decision=deprecated-url.
-  app.post("/api/openclaw/cron-webhook/:userId/:agentId", async (req, res) => {
-    const t0 = Date.now();
-    const { userId, agentId } = req.params;
-    const cap = startCapture("cron-webhook", req, userId, agentId);
-    cap.decision = "deprecated-url";
-    cap.totalMs = Date.now() - t0;
-    console.warn(`[cron-webhook] DEPRECATED URL hit by userId=${userId} agentId=${agentId} — recreate the cron job using the new /:userId/:agentId/:token URL`);
-    res.status(410).json({
-      message: "This cron-webhook URL is deprecated. Recreate the cron job with the new URL pattern that includes a path token.",
-      newUrlPattern: "/api/openclaw/cron-webhook/:userId/:agentId/:token (token = the user's openclaw API key)",
-      received: { userId, agentId },
-    });
+  // POST start a QR setup session (feishu / wecom / weixin)
+  app.post("/api/agent/:slot/channels/:platform/setup", async (req, res) => {
+    if (!req.isAuthenticated() || !req.user) return res.status(401).json({ message: "Not authenticated" });
+    try {
+      const { brand, dm_policy, group_policy } = (req.body ?? {}) as Record<string, string>;
+      const session = await zwChannels.startSetup(req.user.id, req.params.slot, req.params.platform, {
+        brand: brand === "lark" ? "lark" : undefined,
+        dm_policy,
+        group_policy,
+      });
+      // The gateway hands back a bare URI (feishu) or a URL/data-URI (wecom/weixin) — render
+      // server-side to a data-URL PNG so the frontend can treat it exactly like the old
+      // WeChat/WhatsApp QR flow's `imgContent` field. WeChat's own payload may already be a
+      // data:image URI — pass it through unchanged in that case.
+      const raw = session.verification_uri_complete ?? session.qrcode_url ?? "";
+      let imgContent = raw;
+      if (raw && !raw.startsWith("data:image")) {
+        const qrDataUrl = await QRCode.toDataURL(raw, { width: 256, margin: 2 });
+        imgContent = qrDataUrl.replace(/^data:image\/png;base64,/, "");
+      } else if (raw.startsWith("data:image")) {
+        imgContent = raw.replace(/^data:image\/[a-z]+;base64,/, "");
+      }
+      res.json({
+        sessionId: session.session_id,
+        imgContent,
+        expiresIn: session.expires_in,
+        pollInterval: session.poll_interval ?? null,
+      });
+    } catch (err: any) {
+      channelErrorResponse(res, err);
+    }
   });
 
-  // POST /api/openclaw/deliver — openclaw agent pushes a proactive message to Favie
-  // Called by the agent itself when it completes scheduled/background tasks.
-  app.post("/api/openclaw/deliver", async (req, res) => {
-    res.json({ ok: true }); // respond immediately
-    const t0 = Date.now();
-    // Parse body OUT of try so we can capture before we know if it's valid
-    const userIdGuess = (req.body?.userId as string) ?? "(missing)";
-    const agentIdGuess = (req.body?.agentId as string) ?? "(missing)";
-    const cap = startCapture("deliver", req, userIdGuess, agentIdGuess);
+  app.get("/api/agent/:slot/channels/:platform/setup/:sessionId", async (req, res) => {
+    if (!req.isAuthenticated() || !req.user) return res.status(401).json({ message: "Not authenticated" });
+    res.set("Cache-Control", "no-store, no-cache, must-revalidate");
     try {
-      const { userId, agentId, text } = z
-        .object({ userId: z.string(), agentId: z.string(), text: z.string().min(1) })
-        .parse(req.body);
-
-      const { apiKey: expectedKey } = await getEffectiveOpenclawConfig(userId);
-      const trimmedKey = expectedKey.trim();
-      const authHeader = (req.headers.authorization ?? "").trim();
-      setExpectedKey(cap, trimmedKey);
-      cap.authMatch = !!trimmedKey && authHeader === `Bearer ${trimmedKey}`;
-      if (!cap.authMatch) {
-        cap.decision = "unauthorized";
-        cap.totalMs = Date.now() - t0;
-        console.warn(`[deliver] unauthorized userId=${userId} agentId=${agentId} expectedLen=${trimmedKey.length} expectedTail=${cap.expectedKeyTail} got=${cap.authHeaderRedacted}`);
-        return;
-      }
-
-      cap.text = text.slice(0, 500);
-      cap.textLength = text.length;
-
-      // Save to chat_messages
-      const ts = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-      await storage.saveChatMessages([{ userId, agentId, role: "ai", text, ts }]);
-      cap.chatMessageSaved = true;
-
-      // Push to all active channel bindings for this user+agent
-      const bindings = await storage.getAllActiveChannelBindings(agentId, userId);
-      cap.bindingsFound = bindings.length;
-      cap.decision = bindings.length === 0 ? "saved-only" : "delivered";
-      console.log(`[deliver] userId=${userId} agentId=${agentId} found ${bindings.length} binding(s)`);
-      for (const binding of bindings) {
-        const bResult: any = {
-          channelType: binding.channelType,
-          bindingId: binding.id,
-          hasChatId: false,
-          chatIdTail: "(none)",
-          hasHandler: false,
-          sendResult: "skipped-no-handler",
-        };
-        const bStart = Date.now();
-        try {
-          const handler = getChannelHandler(binding.channelType);
-          bResult.hasHandler = !!handler;
-          if (!handler) {
-            console.warn(`[deliver] no handler for ${binding.channelType}`);
-            cap.bindingResults.push(bResult);
-            continue;
-          }
-          const bCfg: Record<string, string> = { ...(binding.channelConfig as Record<string, string>), _bindingId: binding.id };
-          bResult.hasChatId = !!bCfg.chatId;
-          bResult.chatIdTail = bCfg.chatId ? bCfg.chatId.slice(-8) : "(none)";
-          if (!bCfg.chatId) {
-            bResult.sendResult = "skipped-no-chatId";
-            console.warn(`[deliver] ${binding.channelType} binding has no chatId`);
-            cap.bindingResults.push(bResult);
-            continue;
-          }
-          console.log(`[deliver] sending to ${binding.channelType} chatIdTail=${bResult.chatIdTail} hasToken=${!!bCfg.latestContextToken}`);
-          await handler.sendMessage(bCfg.chatId, text, bCfg as any);
-          bResult.sendResult = "ok";
-          bResult.ms = Date.now() - bStart;
-          console.log(`[deliver] ${binding.channelType} sendMessage OK ms=${bResult.ms}`);
-        } catch (e: any) {
-          bResult.sendResult = "error";
-          bResult.errorMessage = (e?.message ?? String(e)).slice(0, 500);
-          bResult.ms = Date.now() - bStart;
-          console.error(`[deliver] ${binding.channelType} sendMessage failed:`, e.message);
-        }
-        cap.bindingResults.push(bResult);
-      }
-      cap.totalMs = Date.now() - t0;
+      res.json(await zwChannels.pollSetup(req.user.id, req.params.slot, req.params.platform, req.params.sessionId));
     } catch (err: any) {
-      cap.decision = "error";
-      cap.errorMessage = (err?.message ?? String(err)).slice(0, 500);
-      cap.totalMs = Date.now() - t0;
-      console.error("[deliver] error:", err.message);
+      channelErrorResponse(res, err);
+    }
+  });
+
+  app.delete("/api/agent/:slot/channels/:platform/setup/:sessionId", async (req, res) => {
+    if (!req.isAuthenticated() || !req.user) return res.status(401).json({ message: "Not authenticated" });
+    try {
+      await zwChannels.cancelSetup(req.user.id, req.params.slot, req.params.platform, req.params.sessionId);
+      res.json({ ok: true });
+    } catch (err: any) {
+      channelErrorResponse(res, err);
+    }
+  });
+
+  // POST bind via explicit credentials (Slack's only path)
+  app.post("/api/agent/:slot/channels/:platform", async (req, res) => {
+    if (!req.isAuthenticated() || !req.user) return res.status(401).json({ message: "Not authenticated" });
+    try {
+      const channel = await zwChannels.addChannelExplicit(req.user.id, req.params.slot, req.params.platform, req.body ?? {});
+      res.status(201).json(channel);
+    } catch (err: any) {
+      channelErrorResponse(res, err);
+    }
+  });
+
+  app.patch("/api/agent/:slot/channels/:platform", async (req, res) => {
+    if (!req.isAuthenticated() || !req.user) return res.status(401).json({ message: "Not authenticated" });
+    try {
+      const channel = await zwChannels.updateChannel(req.user.id, req.params.slot, req.params.platform, req.body ?? {});
+      res.json(channel);
+    } catch (err: any) {
+      channelErrorResponse(res, err);
+    }
+  });
+
+  app.delete("/api/agent/:slot/channels/:platform", async (req, res) => {
+    if (!req.isAuthenticated() || !req.user) return res.status(401).json({ message: "Not authenticated" });
+    try {
+      await zwChannels.removeChannel(req.user.id, req.params.slot, req.params.platform);
+      res.json({ ok: true });
+    } catch (err: any) {
+      channelErrorResponse(res, err);
     }
   });
 
@@ -2096,37 +1960,6 @@ Create a full negotiation package: market analysis, leverage assessment, specifi
     let lines = getLogs(last);
     if (filter) lines = lines.filter(l => l.toLowerCase().includes(filter.toLowerCase()));
     res.type("text/plain").send(lines.join("\n"));
-  });
-
-  // ─── Admin: structured cron-webhook + deliver capture buffer ─────────────────
-  // GET /api/admin/cron-debug?key=<openclaw_api_key>&last=N&decision=unauthorized&userId=...
-  // Auth: session OR ?key= matching system_config.openclaw_api_key (same as /api/admin/logs)
-  app.get("/api/admin/cron-debug", async (req, res) => {
-    const cfg = await storage.getSystemConfig();
-    const apiKey = (cfg["openclaw_api_key"] ?? "").trim();
-    const qKey = ((req.query.key as string) ?? "").trim();
-    const authed = (req.isAuthenticated() && req.user) || (apiKey && qKey === apiKey);
-    if (!authed) {
-      return res.status(401).json({ message: "Not authenticated" });
-    }
-    const last = Math.min(Number(req.query.last) || 50, 200);
-    const decisionFilter = ((req.query.decision as string) ?? "").trim();
-    const userIdFilter = ((req.query.userId as string) ?? "").trim();
-    const agentIdFilter = ((req.query.agentId as string) ?? "").trim();
-    const endpointFilter = ((req.query.endpoint as string) ?? "").trim();
-
-    let captures: CronWebhookCapture[] = getCaptures(200);
-    if (decisionFilter) captures = captures.filter((c) => c.decision === decisionFilter);
-    if (userIdFilter) captures = captures.filter((c) => c.userId.startsWith(userIdFilter));
-    if (agentIdFilter) captures = captures.filter((c) => c.agentId === agentIdFilter);
-    if (endpointFilter) captures = captures.filter((c) => c.endpoint === endpointFilter);
-    captures = captures.slice(-last);
-
-    res.json({
-      summary: getCaptureSummary(),
-      filters: { decision: decisionFilter, userId: userIdFilter, agentId: agentIdFilter, endpoint: endpointFilter, last },
-      captures,
-    });
   });
 
   // ─── Dev: manually trigger memory sync for current user ──────────────────────
@@ -2164,14 +1997,6 @@ Create a full negotiation package: market analysis, leverage assessment, specifi
       console.warn("[memsync] cron error:", e.message);
     }
   });
-
-  // ─── Restore channel connections on server start ────────────────────────────
-  restoreAllPollers().catch((e: Error) =>
-    console.warn("[wechat-poll] restoreAllPollers failed:", e.message)
-  );
-  getWhatsAppManager().restoreAllConnections().catch((e: Error) =>
-    console.warn("[whatsapp] restoreAllConnections failed:", e.message)
-  );
 
   return httpServer;
 }

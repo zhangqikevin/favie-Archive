@@ -81,6 +81,7 @@ export default function RestaurantSetupFlow({ onComplete, compact }: RestaurantS
       setCreateError(null);
       queryClient.invalidateQueries({ queryKey: ["/api/restaurants"] });
       queryClient.invalidateQueries({ queryKey: ["/api/auth/me"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/onboarding/status"] });
       setStep("done");
       setTimeout(() => {
         onComplete?.(data.restaurant);

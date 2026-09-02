@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, type ComponentType } from "react";
+import { useState, useRef, useEffect, type ComponentType, type CSSProperties } from "react";
 import { useTranslation } from "react-i18next";
 import { useLocation, useParams, useSearch } from "wouter";
 import AdminLayout from "@/components/admin-layout";
@@ -28,7 +28,7 @@ import { ChatMarkdown } from "@/components/chat-markdown";
 import { MessageBubble } from "@/components/message-bubble";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
-import { SiTelegram, SiWechat, SiWhatsapp } from "react-icons/si";
+import { SiWechat, SiSlack } from "react-icons/si";
 import {
   Send, ChevronLeft, Briefcase, ChefHat, Megaphone, Headphones,
   ArrowUpRight, ArrowDownRight, Minus, Zap, CheckCircle2, AlertCircle,
@@ -36,7 +36,7 @@ import {
   Bell, ShieldAlert, BarChart2, ListChecks, RefreshCw, MessageSquare,
   CreditCard, Lock, Loader2, PenLine, AlertTriangle, ClipboardList,
   GraduationCap, Building2, BarChart3, Tag, CalendarDays, Users, Video, Trash2,
-  Link2, X,
+  Link2, X, ChevronDown, ChevronUp,
 } from "lucide-react";
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -46,17 +46,82 @@ import {
 
 type AgentId = "operation" | "chef" | "social" | "customer" | "finance" | "legal" | "expert";
 
+interface ToolStep {
+  toolName: string;
+  args?: Record<string, unknown>;
+  isError?: boolean;
+  resultPreview?: string;
+}
+
 interface ChatMsg {
   id: string;
   role: "ai" | "user";
   text: string;
   content?: React.ReactNode;
   ts: string;
+  steps?: ToolStep[];
 }
 
 interface ChipDef {
   label: string;
   response: { text: string; content?: React.ReactNode };
+}
+
+// ─── Tool Steps (Claude Code–style) ─────────────────────────────────────────────
+
+function formatToolArgs(args?: Record<string, unknown>): string {
+  if (!args) return "";
+  const parts = Object.values(args).map((v) => (typeof v === "string" ? v : JSON.stringify(v)));
+  const joined = parts.join(", ");
+  return joined.length > 60 ? `${joined.slice(0, 60)}…` : joined;
+}
+
+function ToolStepRow({ step }: { step: ToolStep }) {
+  const [expanded, setExpanded] = useState(false);
+  const hasPreview = !!step.resultPreview;
+  return (
+    <div className="font-mono text-sm leading-relaxed">
+      <button
+        type="button"
+        onClick={() => hasPreview && setExpanded((v) => !v)}
+        className={cn(
+          "flex items-start gap-1.5 w-full text-left",
+          hasPreview ? "cursor-pointer" : "cursor-default"
+        )}
+      >
+        <span className={cn("mt-0.5 flex-shrink-0", step.isError ? "text-destructive" : "text-muted-foreground")}>●</span>
+        <span className="flex-1 min-w-0 truncate">
+          <span className="text-foreground font-medium">{step.toolName}</span>
+          <span className="text-muted-foreground">({formatToolArgs(step.args)})</span>
+        </span>
+        {hasPreview && (
+          expanded
+            ? <ChevronUp className="w-3 h-3 text-muted-foreground flex-shrink-0 mt-1" />
+            : <ChevronDown className="w-3 h-3 text-muted-foreground flex-shrink-0 mt-1" />
+        )}
+      </button>
+      {hasPreview && (
+        <div className="flex items-start gap-1.5 pl-4">
+          <span className="text-muted-foreground flex-shrink-0">⎿</span>
+          <span className={cn(
+            "text-muted-foreground",
+            expanded ? "whitespace-pre-wrap break-words" : "truncate"
+          )}>
+            {step.resultPreview}
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ToolStepsBlock({ steps }: { steps: ToolStep[] }) {
+  if (steps.length === 0) return null;
+  return (
+    <div className="mb-2 rounded-lg border border-border bg-muted/30 px-3 py-2 space-y-1.5">
+      {steps.map((step, i) => <ToolStepRow key={i} step={step} />)}
+    </div>
+  );
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -1517,61 +1582,55 @@ function ChipBar({ chips, onSend }: {
   );
 }
 
-// ─── Channel Bindings Panel ───────────────────────────────────────────────────
+// ─── ZooWork Channel Panel ──────────────────────────────────────────────────────
+// Binds one of this agent's ZooWork channels (feishu / wecom / weixin via the
+// server-driven QR flow, slack via explicit bot+app tokens). See
+// server/zoowork-channels.ts for the API this talks to — once bound, ZooWork
+// itself owns the conversation on that platform; there's nothing else to wire up.
 
-interface ChannelBinding {
-  id: string;
-  channelType: string;
-  channelConfig: Record<string, string>;
-  active: boolean;
+interface AgentChannel {
+  platform: string;
+  account: string;
+  display_name?: string | null;
+  enabled?: boolean;
+  health?: string;
+  status?: string;
 }
 
-interface ChannelField { key: string; label: string; placeholder: string; hint?: string }
+interface ChannelField { key: string; label: string; placeholder: string }
 interface ChannelDef {
   type: string;
   name: string;
-  icon: ComponentType<{ className?: string; style?: Record<string, string> }>;
+  icon: ComponentType<{ className?: string; style?: CSSProperties }>;
   iconColor: string;
-  fields: ChannelField[];
-  useQrFlow?: true;
+  guided: boolean; // true = server-driven QR setup flow, false = explicit credential form
+  fields?: ChannelField[];
 }
 
 const SUPPORTED_CHANNELS: ChannelDef[] = [
+  { type: "feishu", name: "飞书 Feishu", icon: MessageSquare, iconColor: "#00D6B9", guided: true },
+  { type: "wecom", name: "企业微信 WeCom", icon: MessageSquare, iconColor: "#2AA7E7", guided: true },
+  { type: "weixin", name: "微信 WeChat", icon: SiWechat, iconColor: "#07C160", guided: true },
   {
-    type: "telegram",
-    name: "Telegram",
-    icon: SiTelegram,
-    iconColor: "#26A5E4",
-    fields: [{ key: "botToken", label: "Bot Token", placeholder: "123456:ABC-...", hint: "Create via @BotFather on Telegram" }],
-  },
-  {
-    type: "wechat",
-    name: "WeChat",
-    icon: SiWechat,
-    iconColor: "#07C160",
-    fields: [],
-    useQrFlow: true,
-  },
-  {
-    type: "whatsapp",
-    name: "WhatsApp",
-    icon: SiWhatsapp,
-    iconColor: "#25D366",
-    fields: [],
-    useQrFlow: true,
+    type: "slack",
+    name: "Slack",
+    icon: SiSlack,
+    iconColor: "#4A154B",
+    guided: false,
+    fields: [
+      { key: "botToken", label: "Bot Token", placeholder: "xoxb-..." },
+      { key: "appToken", label: "App Token", placeholder: "xapp-..." },
+    ],
   },
 ];
 
-const IM_CHANNEL_TYPES = ["telegram", "wechat", "whatsapp"];
-
-type QrState = {
-  channelType: string;
+type SetupState = {
+  platform: string;
   sessionId: string;
   imgContent: string;
-  status: "pending" | "confirmed" | "error";
-  // WeChat-specific
-  botToken?: string;
-  baseurl?: string;
+  pollInterval: number | null;
+  status: "pending" | "success" | "expired" | "denied" | "error";
+  message?: string | null;
 };
 
 function ChannelBindingsPanel({ agentId }: { agentId: string }) {
@@ -1579,117 +1638,94 @@ function ChannelBindingsPanel({ agentId }: { agentId: string }) {
   const queryClient = useQueryClient();
   const [connectingType, setConnectingType] = useState<string | null>(null);
   const [formValues, setFormValues] = useState<Record<string, string>>({});
-  const [qrState, setQrState] = useState<QrState | null>(null);
-  const [qrOpen, setQrOpen] = useState(false);
-  const [qrLoading, setQrLoading] = useState(false);
-  const [qrError, setQrError] = useState<string | null>(null);
-  const bindingSaved = useRef(false);
+  const [setupState, setSetupState] = useState<SetupState | null>(null);
+  const [setupOpen, setSetupOpen] = useState(false);
+  const [setupLoading, setSetupLoading] = useState(false);
+  const [setupError, setSetupError] = useState<string | null>(null);
 
-  const { data: bindings = [], isLoading } = useQuery<ChannelBinding[]>({
-    queryKey: [`/api/channel/bindings/${agentId}`],
+  const channelsKey = `/api/agent/${agentId}/channels`;
+  const { data: channels = [], isLoading } = useQuery<AgentChannel[]>({
+    queryKey: [channelsKey],
   });
 
-  const bindingByType = Object.fromEntries(bindings.map(b => [b.channelType, b]));
+  const channelByType = Object.fromEntries(channels.map(c => [c.platform, c]));
+  const boundChannel = channels.find(c => c.enabled !== false);
 
-  const connectMutation = useMutation({
-    mutationFn: async ({ channelType, config }: { channelType: string; config: Record<string, string> }) => {
-      const res = await apiRequest("POST", `/api/channel/${channelType}/binding/${agentId}`, config);
+  const addMutation = useMutation({
+    mutationFn: async ({ platform, config }: { platform: string; config: Record<string, string> }) => {
+      const res = await apiRequest("POST", `${channelsKey}/${platform}`, config);
       return res.json();
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: [`/api/channel/bindings/${agentId}`] });
+      queryClient.invalidateQueries({ queryKey: [channelsKey] });
       setConnectingType(null);
       setFormValues({});
     },
   });
 
-  const disconnectMutation = useMutation({
-    mutationFn: async (channelType: string) => {
-      const res = await apiRequest("DELETE", `/api/channel/${channelType}/binding/${agentId}`);
+  const updateMutation = useMutation({
+    mutationFn: async ({ platform, patch }: { platform: string; patch: Record<string, unknown> }) => {
+      const res = await apiRequest("PATCH", `${channelsKey}/${platform}`, patch);
       return res.json();
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: [`/api/channel/bindings/${agentId}`] });
-    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: [channelsKey] }),
   });
 
-  // Check if an IM channel is already bound (for mutual exclusion display)
-  const boundImChannel = bindings.find(b => IM_CHANNEL_TYPES.includes(b.channelType));
+  const removeMutation = useMutation({
+    mutationFn: async (platform: string) => {
+      const res = await apiRequest("DELETE", `${channelsKey}/${platform}`);
+      return res.json();
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: [channelsKey] }),
+  });
 
-  // Poll for QR scan status (WeChat & WhatsApp)
+  // Poll a running QR setup session until it leaves "pending".
   useEffect(() => {
-    if (!qrState || qrState.status !== "pending") return;
+    if (!setupState || setupState.status !== "pending") return;
     let cancelled = false;
-    const { sessionId, channelType } = qrState;
-    const pollUrl = channelType === "wechat"
-      ? `/api/channel/wechat/login-status/${sessionId}`
-      : `/api/channel/whatsapp/login-status/${sessionId}`;
+    const { platform, sessionId, pollInterval } = setupState;
     (async () => {
       while (!cancelled) {
+        await new Promise(r => setTimeout(r, (pollInterval ?? 3) * 1000));
+        if (cancelled) return;
         try {
-          const res = await apiRequest("GET", pollUrl);
+          const res = await apiRequest("GET", `${channelsKey}/${platform}/setup/${sessionId}`);
           if (cancelled) return;
-          const data = await res.json() as { status: string; botToken?: string; baseurl?: string; imgContent?: string };
-          // Update QR image if refreshed (WhatsApp refreshes QR periodically)
-          if (data.imgContent && data.status === "pending") {
-            setQrState(prev => prev ? { ...prev, imgContent: data.imgContent! } : null);
-          }
-          if (channelType === "wechat" && data.status === "confirmed" && data.botToken && !bindingSaved.current) {
-            bindingSaved.current = true;
+          const data = await res.json() as { status: string; message?: string | null };
+          if (data.status !== "pending") {
             cancelled = true;
-            setQrState(prev => prev ? { ...prev, status: "confirmed" } : null);
-            connectMutation.mutate(
-              { channelType: "wechat", config: { botToken: data.botToken!, baseurl: data.baseurl || "" } },
-              {
-                onSuccess: () => setTimeout(() => setQrOpen(false), 1500),
-                onError: (err: any) => {
-                  bindingSaved.current = false;
-                  setQrError(err.message || "Failed to save binding");
-                },
-              },
-            );
+            setSetupState(prev => prev ? { ...prev, status: data.status as SetupState["status"], message: data.message } : null);
+            if (data.status === "success") {
+              queryClient.invalidateQueries({ queryKey: [channelsKey] });
+              setTimeout(() => setSetupOpen(false), 1500);
+            }
             return;
           }
-          if (channelType === "whatsapp" && data.status === "confirmed" && !bindingSaved.current) {
-            bindingSaved.current = true;
-            cancelled = true;
-            setQrState(prev => prev ? { ...prev, status: "confirmed" } : null);
-            connectMutation.mutate(
-              { channelType: "whatsapp", config: { sessionId } },
-              {
-                onSuccess: () => setTimeout(() => setQrOpen(false), 1500),
-                onError: (err: any) => {
-                  bindingSaved.current = false;
-                  setQrError(err.message || "Failed to save binding");
-                },
-              },
-            );
-            return;
-          }
-        } catch { /* ignore individual poll errors and retry */ }
-        await new Promise(r => setTimeout(r, channelType === "whatsapp" ? 2000 : 500));
+        } catch { /* transient poll error — keep trying until the session itself expires */ }
       }
     })();
     return () => { cancelled = true; };
-  }, [qrState?.sessionId, qrState?.status]);
+  }, [setupState?.sessionId, setupState?.status]);
 
-  async function handleQrConnect(channelType: string) {
-    bindingSaved.current = false;
-    setQrLoading(true);
-    setQrError(null);
+  async function handleGuidedConnect(platform: string) {
+    setSetupLoading(true);
+    setSetupError(null);
     try {
-      const endpoint = channelType === "wechat"
-        ? "/api/channel/wechat/init-login"
-        : "/api/channel/whatsapp/init-login";
-      const res = await apiRequest("POST", endpoint);
-      const data = await res.json() as { qrcodeId?: string; sessionId?: string; imgContent: string };
-      const sid = data.sessionId || data.qrcodeId || "";
-      setQrState({ channelType, sessionId: sid, imgContent: data.imgContent, status: "pending" });
-      setQrOpen(true);
+      const res = await apiRequest("POST", `${channelsKey}/${platform}/setup`, {});
+      const data = await res.json() as { sessionId: string; imgContent: string; pollInterval: number | null };
+      setSetupState({ platform, sessionId: data.sessionId, imgContent: data.imgContent, pollInterval: data.pollInterval, status: "pending" });
+      setSetupOpen(true);
     } catch (e: any) {
-      setQrError(e.message || "Failed to generate QR code");
+      setSetupError(e.message || "Failed to start setup");
     } finally {
-      setQrLoading(false);
+      setSetupLoading(false);
+    }
+  }
+
+  function closeSetupModal() {
+    setSetupOpen(false);
+    if (setupState && setupState.status === "pending") {
+      apiRequest("DELETE", `${channelsKey}/${setupState.platform}/setup/${setupState.sessionId}`).catch(() => {});
     }
   }
 
@@ -1701,37 +1737,39 @@ function ChannelBindingsPanel({ agentId }: { agentId: string }) {
       ) : (
         <div className="space-y-2">
           {[...SUPPORTED_CHANNELS].sort((a, b) => {
-            const aBound = bindingByType[a.type] ? 1 : 0;
-            const bBound = bindingByType[b.type] ? 1 : 0;
+            const aBound = channelByType[a.type] ? 1 : 0;
+            const bBound = channelByType[b.type] ? 1 : 0;
             return bBound - aBound;
           }).map((ch) => {
-            const bound = bindingByType[ch.type];
+            const bound = channelByType[ch.type];
             const isConnecting = connectingType === ch.type;
-            const isIm = IM_CHANNEL_TYPES.includes(ch.type);
-            // Another IM channel is already bound (not this one)
-            const blockedByOtherIm = isIm && boundImChannel && boundImChannel.channelType !== ch.type;
+            // Only one platform may be bound to this agent at a time — see zoowork-channels.ts.
+            const blockedByOther = !bound && boundChannel && boundChannel.platform !== ch.type;
+            const unhealthy = bound && (bound.health === "unhealthy" || bound.status === "error");
             return (
               <div key={ch.type} className="rounded-lg border border-border bg-background overflow-hidden">
                 <div className="flex items-center gap-2.5 px-3 py-2.5">
                   <ch.icon style={{ color: ch.iconColor }} className="w-4 h-4 flex-shrink-0" />
                   <span className="text-sm font-medium text-foreground flex-1">{ch.name}</span>
                   {bound ? (
-                    <span className="text-xs font-medium text-green-600 bg-green-50 px-1.5 py-0.5 rounded">{t("agents_page.channel_connected")}</span>
-                  ) : ch.useQrFlow ? (
+                    <span className={cn("text-xs font-medium px-1.5 py-0.5 rounded", unhealthy ? "text-amber-600 bg-amber-50" : "text-green-600 bg-green-50")}>
+                      {unhealthy ? t("agents_page.channel_unhealthy") : t("agents_page.channel_connected")}
+                    </span>
+                  ) : ch.guided ? (
                     <button
-                      onClick={() => handleQrConnect(ch.type)}
-                      disabled={qrLoading || !!blockedByOtherIm}
+                      onClick={() => handleGuidedConnect(ch.type)}
+                      disabled={setupLoading || !!blockedByOther}
                       className="text-xs text-primary hover:underline disabled:opacity-50"
-                      title={blockedByOtherIm ? `已绑定 ${boundImChannel!.channelType}，请先断开` : undefined}
+                      title={blockedByOther ? `已绑定 ${boundChannel!.platform}，请先断开` : undefined}
                     >
-                      {qrLoading ? <Loader2 className="w-3 h-3 animate-spin inline" /> : t("agents_page.channel_connect")}
+                      {setupLoading ? <Loader2 className="w-3 h-3 animate-spin inline" /> : t("agents_page.channel_connect")}
                     </button>
                   ) : (
                     <button
                       onClick={() => { setConnectingType(isConnecting ? null : ch.type); setFormValues({}); }}
-                      disabled={!!blockedByOtherIm}
+                      disabled={!!blockedByOther}
                       className="text-xs text-primary hover:underline disabled:opacity-50"
-                      title={blockedByOtherIm ? `已绑定 ${boundImChannel!.channelType}，请先断开` : undefined}
+                      title={blockedByOther ? `已绑定 ${boundChannel!.platform}，请先断开` : undefined}
                     >
                       {isConnecting ? t("agents_page.channel_cancel") : t("agents_page.channel_connect")}
                     </button>
@@ -1741,23 +1779,30 @@ function ChannelBindingsPanel({ agentId }: { agentId: string }) {
                 {bound && (
                   <div className="px-3 pb-2.5 flex items-center justify-between">
                     <span className="text-xs text-muted-foreground font-mono truncate max-w-[110px]">
-                      {bound.channelConfig.botUsername && !["wechat", "whatsapp"].includes(bound.channelConfig.botUsername)
-                        ? `@${bound.channelConfig.botUsername}`
-                        : "connected"}
+                      {bound.display_name || bound.account}
                     </span>
-                    <button
-                      onClick={() => disconnectMutation.mutate(ch.type)}
-                      disabled={disconnectMutation.isPending}
-                      className="text-xs text-destructive hover:underline"
-                    >
-                      {disconnectMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : t("agents_page.channel_disconnect")}
-                    </button>
+                    <div className="flex items-center gap-3">
+                      <button
+                        onClick={() => updateMutation.mutate({ platform: ch.type, patch: { enabled: bound.enabled === false } })}
+                        disabled={updateMutation.isPending}
+                        className="text-xs text-muted-foreground hover:underline"
+                      >
+                        {bound.enabled === false ? t("agents_page.channel_enable") : t("agents_page.channel_disable")}
+                      </button>
+                      <button
+                        onClick={() => removeMutation.mutate(ch.type)}
+                        disabled={removeMutation.isPending}
+                        className="text-xs text-destructive hover:underline"
+                      >
+                        {removeMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : t("agents_page.channel_disconnect")}
+                      </button>
+                    </div>
                   </div>
                 )}
 
-                {isConnecting && !bound && !ch.useQrFlow && (
+                {isConnecting && !bound && !ch.guided && (
                   <div className="px-3 pb-3 space-y-2 border-t border-border pt-2.5">
-                    {ch.fields.map((f) => (
+                    {ch.fields?.map((f) => (
                       <div key={f.key}>
                         <label className="text-xs text-muted-foreground mb-1 block">{f.label}</label>
                         <Input
@@ -1766,71 +1811,178 @@ function ChannelBindingsPanel({ agentId }: { agentId: string }) {
                           placeholder={f.placeholder}
                           className="text-xs font-mono h-7"
                         />
-                        {f.hint && <p className="text-xs text-muted-foreground mt-0.5">{f.hint}</p>}
                       </div>
                     ))}
                     <Button
                       size="sm"
                       className="w-full h-7 text-xs"
-                      disabled={connectMutation.isPending || !formValues[ch.fields[0]?.key]?.trim()}
-                      onClick={() => connectMutation.mutate({ channelType: ch.type, config: formValues })}
+                      disabled={addMutation.isPending || !ch.fields?.every(f => formValues[f.key]?.trim())}
+                      onClick={() => addMutation.mutate({ platform: ch.type, config: formValues })}
                     >
-                      {connectMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <><Link2 className="w-3 h-3 mr-1" />{t("agents_page.channel_connect")}</>}
+                      {addMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <><Link2 className="w-3 h-3 mr-1" />{t("agents_page.channel_connect")}</>}
+                    </Button>
+                    {addMutation.isError && (
+                      <p className="text-xs text-destructive mt-1">{(addMutation.error as Error)?.message || "Connect failed"}</p>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          {setupError && (
+            <p className="text-xs text-destructive">{setupError}</p>
+          )}
+        </div>
+      )}
+
+      {/* QR setup dialog (feishu / wecom / weixin) */}
+      {setupOpen && setupState && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="bg-background rounded-xl shadow-xl p-6 w-72 flex flex-col items-center gap-4 relative">
+            <button
+              onClick={closeSetupModal}
+              className="absolute top-3 right-3 text-muted-foreground hover:text-foreground"
+            >
+              <X className="w-4 h-4" />
+            </button>
+            <p className="text-sm font-semibold text-foreground">
+              {SUPPORTED_CHANNELS.find(c => c.type === setupState.platform)?.name}
+            </p>
+            {setupState.status === "success" ? (
+              <div className="flex flex-col items-center gap-2">
+                <div className="w-12 h-12 rounded-full bg-green-100 flex items-center justify-center">
+                  <CheckCircle2 className="w-6 h-6 text-green-600" />
+                </div>
+                <p className="text-sm font-medium text-green-600">{t("agents_page.channel_connected")}</p>
+              </div>
+            ) : setupState.status === "pending" ? (
+              <>
+                <img
+                  src={setupState.imgContent.startsWith("http") ? setupState.imgContent : `data:image/png;base64,${setupState.imgContent}`}
+                  alt="QR Code"
+                  className="w-44 h-44 rounded-lg border border-border"
+                />
+                <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                  <span>{t("agents_page.channel_waiting_scan")}</span>
+                </div>
+              </>
+            ) : (
+              <p className="text-sm text-destructive text-center">
+                {setupState.status === "expired" ? t("agents_page.channel_setup_expired")
+                  : setupState.status === "denied" ? t("agents_page.channel_setup_denied")
+                  : setupState.message || t("agents_page.channel_setup_error")}
+              </p>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── MCP Connect Panel ──────────────────────────────────────────────────────────
+// Lets the customer supply their own key for an MCP tool this agent offers.
+// The key is sent once and encrypted server-side — Favie's proxy injects it into
+// requests to the real (authenticated) MCP server; we never store it in plaintext.
+
+interface McpServerAvailable {
+  id: string;
+  key: string;
+  name: string;
+  description: string | null;
+  connected: boolean;
+}
+
+function McpConnectPanel() {
+  const queryClient = useQueryClient();
+  const [connectingId, setConnectingId] = useState<string | null>(null);
+  const [apiKey, setApiKey] = useState("");
+
+  const { data, isLoading } = useQuery<{ mcpServers: McpServerAvailable[] }>({
+    queryKey: ["/api/mcp/available"],
+  });
+  const servers = data?.mcpServers ?? [];
+
+  const connectMutation = useMutation({
+    mutationFn: (mcpServerId: string) => apiRequest("POST", "/api/mcp/connect", { mcpServerId, apiKey }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/mcp/available"] });
+      setConnectingId(null);
+      setApiKey("");
+    },
+  });
+  const disconnectMutation = useMutation({
+    mutationFn: (mcpServerId: string) => apiRequest("DELETE", `/api/mcp/connect/${mcpServerId}`),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["/api/mcp/available"] }),
+  });
+
+  if (!isLoading && servers.length === 0) return null;
+
+  return (
+    <div className="px-4 py-3 border-t border-border">
+      <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-3">MCP Tools</p>
+      {isLoading ? (
+        <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />
+      ) : (
+        <div className="space-y-2">
+          {servers.map((s) => {
+            const isConnecting = connectingId === s.id;
+            return (
+              <div key={s.id} className="rounded-lg border border-border bg-background overflow-hidden">
+                <div className="flex items-center gap-2.5 px-3 py-2.5">
+                  <Link2 className="w-4 h-4 flex-shrink-0 text-muted-foreground" />
+                  <span className="text-sm font-medium text-foreground flex-1">{s.name}</span>
+                  {s.connected ? (
+                    <span className="text-xs font-medium text-green-600 bg-green-50 px-1.5 py-0.5 rounded">Connected</span>
+                  ) : (
+                    <button
+                      onClick={() => { setConnectingId(isConnecting ? null : s.id); setApiKey(""); }}
+                      className="text-xs text-primary hover:underline"
+                    >
+                      {isConnecting ? "Cancel" : "Connect"}
+                    </button>
+                  )}
+                </div>
+                {s.description && (
+                  <p className="px-3 pb-2 text-xs text-muted-foreground">{s.description}</p>
+                )}
+                {s.connected && (
+                  <div className="px-3 pb-2.5 flex justify-end">
+                    <button
+                      onClick={() => disconnectMutation.mutate(s.id)}
+                      disabled={disconnectMutation.isPending}
+                      className="text-xs text-destructive hover:underline"
+                    >
+                      {disconnectMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : "Disconnect"}
+                    </button>
+                  </div>
+                )}
+                {isConnecting && !s.connected && (
+                  <div className="px-3 pb-3 space-y-2 border-t border-border pt-2.5">
+                    <Input
+                      type="password"
+                      value={apiKey}
+                      onChange={(e) => setApiKey(e.target.value)}
+                      placeholder="Paste your API key"
+                      className="text-xs font-mono h-7"
+                    />
+                    <Button
+                      size="sm"
+                      className="w-full h-7 text-xs"
+                      disabled={connectMutation.isPending || !apiKey.trim()}
+                      onClick={() => connectMutation.mutate(s.id)}
+                    >
+                      {connectMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <><Link2 className="w-3 h-3 mr-1" />Connect</>}
                     </Button>
                     {connectMutation.isError && (
                       <p className="text-xs text-destructive mt-1">{(connectMutation.error as Error)?.message || "Connect failed"}</p>
                     )}
                   </div>
                 )}
-
-                {qrError && ch.useQrFlow && (
-                  <p className="px-3 pb-2 text-xs text-destructive">{qrError}</p>
-                )}
               </div>
             );
           })}
-        </div>
-      )}
-
-      {/* QR code dialog (WeChat & WhatsApp) */}
-      {qrOpen && qrState && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="bg-background rounded-xl shadow-xl p-6 w-72 flex flex-col items-center gap-4 relative">
-            <button
-              onClick={() => setQrOpen(false)}
-              className="absolute top-3 right-3 text-muted-foreground hover:text-foreground"
-            >
-              <X className="w-4 h-4" />
-            </button>
-            <p className="text-sm font-semibold text-foreground">
-              {qrState.channelType === "wechat" ? "绑定微信 / Connect WeChat" : "绑定 WhatsApp / Connect WhatsApp"}
-            </p>
-            <p className="text-xs text-muted-foreground text-center leading-relaxed">
-              {qrState.channelType === "wechat"
-                ? <>用微信扫描二维码<br/><span className="text-muted-foreground/70">Scan with WeChat</span></>
-                : <>打开 WhatsApp → 设置 → 已关联设备 → 关联设备<br/><span className="text-muted-foreground/70">WhatsApp → Settings → Linked Devices → Link a Device</span></>}
-            </p>
-            {qrState.status === "confirmed" ? (
-              <div className="flex flex-col items-center gap-2">
-                <div className="w-12 h-12 rounded-full bg-green-100 flex items-center justify-center">
-                  <CheckCircle2 className="w-6 h-6 text-green-600" />
-                </div>
-                <p className="text-sm font-medium text-green-600">已连接 / Connected</p>
-              </div>
-            ) : (
-              <>
-                <img
-                  src={qrState.imgContent.startsWith("http") ? qrState.imgContent : `data:image/png;base64,${qrState.imgContent}`}
-                  alt="QR Code"
-                  className="w-44 h-44 rounded-lg border border-border"
-                />
-                <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                  <Loader2 className="w-3 h-3 animate-spin" />
-                  <span>等待扫码… / Waiting for scan…</span>
-                </div>
-              </>
-            )}
-          </div>
         </div>
       )}
     </div>
@@ -1896,6 +2048,7 @@ function AgentContextPanel({ config, agentId, restaurant }: { config: AgentConfi
         <p className="text-sm text-muted-foreground italic">{t("agents_page.context_nothing_scheduled")}</p>
       </div>
       <ChannelBindingsPanel agentId={agentId} />
+      <McpConnectPanel />
     </div>
   );
 }
@@ -2474,8 +2627,8 @@ export default function AgentChatPage() {
           if (res.status >= 400 && res.status < 500) throw error;
           lastErr = error;
         } else {
-          const data = await res.json() as { text: string };
-          return data.text;
+          const data = await res.json() as { text: string; steps?: ToolStep[] };
+          return { text: data.text, steps: data.steps ?? [] };
         }
       } catch (e: any) {
         // Re-throw 4xx without retrying.
@@ -2497,8 +2650,8 @@ export default function AgentChatPage() {
     setIsLoading(true);
     try {
       const history = buildHistory(messages);
-      const aiText = await callKimi(chip.label, history);
-      const aiMsg: ChatMsg = { id: makeId(), role: "ai", text: aiText, content: chip.response.content, ts: nowStr() };
+      const { text: aiText, steps } = await callKimi(chip.label, history);
+      const aiMsg: ChatMsg = { id: makeId(), role: "ai", text: aiText, content: chip.response.content, ts: nowStr(), steps };
       setMessages((m) => [...m, aiMsg]);
       saveMessages(userMsg, aiMsg);
     } catch {
@@ -2524,8 +2677,8 @@ export default function AgentChatPage() {
       const taskContext = taskId ? (AGENT_TASK_CONTEXTS[agentId]?.[taskId] ?? null) : null;
       if (taskId) pendingTaskId.current = null;
       const llmText = taskContext ? `${taskContext}\n\nUser's data: ${text}` : text;
-      const aiText = await callKimi(llmText, history);
-      const aiMsg: ChatMsg = { id: makeId(), role: "ai", text: aiText, ts: nowStr() };
+      const { text: aiText, steps } = await callKimi(llmText, history);
+      const aiMsg: ChatMsg = { id: makeId(), role: "ai", text: aiText, ts: nowStr(), steps };
       setMessages((m) => [...m, aiMsg]);
       saveMessages(userMsg, aiMsg);
     } catch {
@@ -2704,6 +2857,9 @@ export default function AgentChatPage() {
                       <span className="text-sm font-semibold text-foreground">{msg.role === "ai" ? config.name : t("agents_page.chat_you")}</span>
                       <span className="text-sm text-muted-foreground">{msg.ts}</span>
                     </div>
+                    {msg.role === "ai" && msg.steps && msg.steps.length > 0 && (
+                      <ToolStepsBlock steps={msg.steps} />
+                    )}
                     <MessageBubble
                       className={cn("rounded-xl px-4 py-3 text-sm leading-relaxed",
                         msg.role === "ai" ? "bg-card border border-border text-foreground" : "bg-primary text-primary-foreground")}
