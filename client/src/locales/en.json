@@ -803,6 +803,7 @@
     "tab_browse": "Browse",
     "tab_connected": "Connected",
     "search_placeholder": "Search apps…",
+    "category_all": "All",
     "load_more": "Load more",
     "none_connected": "You haven't connected anything yet — browse apps to connect one."
   },

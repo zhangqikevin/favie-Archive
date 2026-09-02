@@ -65,12 +65,17 @@ export async function deleteComposioConnection(apiKey: string, connectedAccountI
   });
 }
 
+export interface ComposioCategory {
+  id: string;
+  name: string;
+}
+
 export interface ComposioToolkit {
   slug: string;
   name: string;
   logo: string | null;
   description: string | null;
-  categories: string[];
+  categories: ComposioCategory[];
   /** false when this toolkit needs a bring-your-own OAuth app — we can't self-serve those. */
   selfServeCapable: boolean;
 }
@@ -80,13 +85,20 @@ export interface ComposioToolkitPage {
   nextCursor: string | null;
 }
 
-/** The full catalog of apps Composio can connect to, for the "browse" tab. */
+/**
+ * The full catalog of apps Composio can connect to, for the "browse" tab. `category` must
+ * be an id as it actually appears on a toolkit's own `categories` list (see
+ * connectors-service.ts's getPopularCategories) — Composio's separate /toolkits/categories
+ * endpoint returns ~800 mostly-unfiltered ids, many of which silently match zero toolkits
+ * when passed back in as a filter, so we don't source category ids from it directly.
+ */
 export async function listComposioToolkits(
   apiKey: string,
-  opts: { search?: string; cursor?: string; limit?: number } = {},
+  opts: { search?: string; category?: string; cursor?: string; limit?: number } = {},
 ): Promise<ComposioToolkitPage> {
   const params = new URLSearchParams({ limit: String(opts.limit ?? 50) });
   if (opts.search) params.set("search", opts.search);
+  if (opts.category) params.set("category", opts.category);
   if (opts.cursor) params.set("cursor", opts.cursor);
   const data = await composioFetch(apiKey, `/toolkits?${params.toString()}`);
   const items: ComposioToolkit[] = (data.items ?? []).map((t: any) => ({
@@ -94,7 +106,7 @@ export async function listComposioToolkits(
     name: t.name,
     logo: t.meta?.logo ?? null,
     description: t.meta?.description ?? null,
-    categories: (t.meta?.categories ?? []).map((c: any) => c.name),
+    categories: (t.meta?.categories ?? []).map((c: any) => ({ id: c.id, name: c.name })),
     selfServeCapable: t.no_auth === true || (t.composio_managed_auth_schemes ?? []).length > 0,
   }));
   return { items, nextCursor: data.next_cursor ?? null };

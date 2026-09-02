@@ -13,6 +13,8 @@ import {
   composioMcpServerUrl,
   findComposioConnection,
   startComposioConnection,
+  listComposioToolkits,
+  type ComposioCategory,
 } from "./composio-client";
 import type { McpServer } from "@shared/schema";
 
@@ -96,6 +98,41 @@ export async function checkToolkitConnectionStatus(
   }
   const pending = remote ? !["FAILED", "EXPIRED"].includes(remote.status) : false;
   return { connected: false, pending };
+}
+
+let categoryCache: { categories: (ComposioCategory & { count: number })[]; fetchedAt: number } | null = null;
+const CATEGORY_CACHE_TTL_MS = 60 * 60 * 1000;
+
+/**
+ * Category ids/names, ranked by how often they actually show up on a toolkit — sampled from
+ * real toolkit data rather than Composio's separate /toolkits/categories endpoint, whose ~800
+ * ids are mostly unfiltered and often don't match anything when passed back in as a filter
+ * (see listComposioToolkits' doc comment). Cached in-process since this rarely changes.
+ */
+export async function getPopularCategories(limit = 14): Promise<ComposioCategory[]> {
+  if (categoryCache && Date.now() - categoryCache.fetchedAt < CATEGORY_CACHE_TTL_MS) {
+    return categoryCache.categories.slice(0, limit);
+  }
+  const apiKey = composioApiKey();
+  const counts = new Map<string, { name: string; count: number }>();
+  let cursor: string | undefined;
+  for (let page = 0; page < 4; page++) {
+    const result = await listComposioToolkits(apiKey, { cursor, limit: 100 });
+    for (const toolkit of result.items) {
+      if (!toolkit.selfServeCapable) continue;
+      for (const cat of toolkit.categories) {
+        const existing = counts.get(cat.id);
+        counts.set(cat.id, { name: cat.name, count: (existing?.count ?? 0) + 1 });
+      }
+    }
+    if (!result.nextCursor) break;
+    cursor = result.nextCursor;
+  }
+  const ranked = Array.from(counts.entries())
+    .map(([id, { name, count }]) => ({ id, name, count }))
+    .sort((a, b) => b.count - a.count);
+  categoryCache = { categories: ranked, fetchedAt: Date.now() };
+  return ranked.slice(0, limit);
 }
 
 export interface ConnectedConnector {

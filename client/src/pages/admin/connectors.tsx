@@ -13,7 +13,6 @@ interface CatalogToolkit {
   name: string;
   logo: string | null;
   description: string | null;
-  categories: string[];
   connected: boolean;
 }
 interface CatalogPage {
@@ -25,6 +24,10 @@ interface ConnectedItem {
   key: string;
   name: string;
   description: string | null;
+}
+interface Category {
+  id: string;
+  name: string;
 }
 
 // Toolkits the user just hit "Connect" on — polled until they go ACTIVE at Composio.
@@ -63,6 +66,7 @@ function BrowseTab() {
   const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [category, setCategory] = useState<string | undefined>(undefined);
   const [pages, setPages] = useState<CatalogToolkit[]>([]);
   const [cursor, setCursor] = useState<string | undefined>(undefined);
 
@@ -76,20 +80,24 @@ function BrowseTab() {
     queryClient.invalidateQueries({ queryKey: ["/api/connectors/connected"] });
   });
 
+  const { data: categoriesData } = useQuery<{ items: Category[] }>({ queryKey: ["/api/connectors/categories"] });
+  const categories = categoriesData?.items ?? [];
+
   const params = new URLSearchParams();
   if (debouncedSearch) params.set("search", debouncedSearch);
+  if (category) params.set("category", category);
   if (cursor) params.set("cursor", cursor);
-  const queryKey = ["/api/connectors/catalog", debouncedSearch, cursor];
+  const queryKey = ["/api/connectors/catalog", debouncedSearch, category, cursor];
   const { data, isLoading, isFetching } = useQuery<CatalogPage>({
     queryKey,
     queryFn: () => fetch(`/api/connectors/catalog?${params.toString()}`).then((r) => r.json()),
   });
 
-  // Reset the accumulated list whenever the search term changes (not on load-more).
+  // Reset the accumulated list whenever the search term or category changes (not on load-more).
   useEffect(() => {
     setCursor(undefined);
     setPages([]);
-  }, [debouncedSearch]);
+  }, [debouncedSearch, category]);
 
   useEffect(() => {
     if (data?.items) setPages((prev) => (cursor ? [...prev, ...data.items] : data.items));
@@ -120,6 +128,34 @@ function BrowseTab() {
           data-testid="input-connector-search"
         />
       </div>
+
+      {categories.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 mb-4">
+          <button
+            onClick={() => setCategory(undefined)}
+            className={cn(
+              "px-2.5 py-1 rounded-full text-xs font-medium transition-colors",
+              !category ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground hover:bg-muted/70",
+            )}
+            data-testid="category-all"
+          >
+            {t("connectors_page.category_all")}
+          </button>
+          {categories.map((cat) => (
+            <button
+              key={cat.id}
+              onClick={() => setCategory(cat.id === category ? undefined : cat.id)}
+              className={cn(
+                "px-2.5 py-1 rounded-full text-xs font-medium capitalize transition-colors",
+                category === cat.id ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground hover:bg-muted/70",
+              )}
+              data-testid={`category-${cat.id}`}
+            >
+              {cat.name}
+            </button>
+          ))}
+        </div>
+      )}
 
       {isLoading ? (
         <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />

@@ -803,6 +803,7 @@
     "tab_browse": "浏览",
     "tab_connected": "已连接",
     "search_placeholder": "搜索应用…",
+    "category_all": "全部",
     "load_more": "加载更多",
     "none_connected": "你还没有连接任何应用——去「浏览」里连接一个吧。"
   },

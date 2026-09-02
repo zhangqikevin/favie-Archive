@@ -30,6 +30,7 @@ import {
   startToolkitConnection,
   checkToolkitConnectionStatus,
   listConnectedConnectors,
+  getPopularCategories,
 } from "./connectors-service";
 import { getLogs } from "./log-buffer";
 import * as zwChannels from "./zoowork-channels";
@@ -636,8 +637,9 @@ export async function registerRoutes(
     }
     try {
       const search = typeof req.query.search === "string" ? req.query.search : undefined;
+      const category = typeof req.query.category === "string" ? req.query.category : undefined;
       const cursor = typeof req.query.cursor === "string" ? req.query.cursor : undefined;
-      const page = await listComposioToolkits(composioApiKey(), { search, cursor, limit: 40 });
+      const page = await listComposioToolkits(composioApiKey(), { search, category, cursor, limit: 40 });
       const connected = new Set((await listConnectedConnectors(req.user.id)).map((c) => c.key));
       res.json({
         items: page.items
@@ -647,6 +649,18 @@ export async function registerRoutes(
       });
     } catch (err: any) {
       res.status(500).json({ message: err.message || "Failed to load connector catalog" });
+    }
+  });
+
+  // GET /api/connectors/categories — ranked category filter chips for the Browse tab.
+  app.get("/api/connectors/categories", async (req, res) => {
+    if (!req.isAuthenticated() || !req.user) {
+      return res.status(401).json({ message: "Not authenticated" });
+    }
+    try {
+      res.json({ items: await getPopularCategories() });
+    } catch (err: any) {
+      res.status(500).json({ message: err.message || "Failed to load connector categories" });
     }
   });
 
