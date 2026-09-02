@@ -144,7 +144,10 @@ export async function listOrgSkills() {
 async function getConnectedMcpServers(userId: string, catalogId: string) {
   const boundServers = await storage.getMcpServersForAgent(catalogId);
   const selfServeServers = await storage.getSelfServeMcpServers();
-  const candidates = [...boundServers, ...selfServeServers];
+  // A server can be both explicitly bound AND self-serve-eligible (e.g. a sysadmin bound
+  // it to this catalog entry after a customer had already provisioned it via Browse) —
+  // dedupe by id or ZooWork rejects the mcp[] array outright ("must be unique server names").
+  const candidates = Array.from(new Map([...boundServers, ...selfServeServers].map((s) => [s.id, s])).values());
   const connected: { server: (typeof candidates)[number]; credential: UserMcpCredential }[] = [];
   for (const server of candidates) {
     const cred = await storage.getUserMcpCredential(userId, server.id);
