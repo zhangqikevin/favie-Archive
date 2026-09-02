@@ -2,10 +2,10 @@ import { Link, useLocation } from "wouter";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
-  Users2, FolderOpen, Settings,
+  Users2, FolderOpen, Settings, Link2,
   Utensils, LogOut, Menu, ChevronDown, Check, Building2,
   ChefHat, Headphones, Plus, Loader2, ShoppingBag, Store,
-  DollarSign, Star, ClipboardList, Megaphone, Scale,
+  DollarSign, Star, ClipboardList, Megaphone, Scale, Bot,
 } from "lucide-react";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import {
@@ -22,6 +22,9 @@ import RestaurantOnboardingModal from "@/components/restaurant-onboarding-modal"
 
 interface NavItemDef {
   labelKey: string;
+  /** Literal label, for sysadmin-authored text with no translation (e.g. a generic
+   * catalog product's own name). Takes priority over labelKey when set. */
+  label?: string;
   href: string;
   icon: React.ElementType;
   dot?: string;
@@ -63,17 +66,18 @@ const navSections: NavSection[] = [
   },
   {
     items: [
-      { labelKey: "admin.files",    href: "/admin/files",    icon: FolderOpen },
-      { labelKey: "admin.settings", href: "/admin/settings", icon: Settings },
+      { labelKey: "admin.files",      href: "/admin/files",      icon: FolderOpen },
+      { labelKey: "admin.connectors", href: "/admin/connectors", icon: Link2 },
+      { labelKey: "admin.settings",   href: "/admin/settings",   icon: Settings },
     ],
   },
 ];
 
-function NavItem({ href, icon: Icon, labelKey, dot }: NavItemDef) {
+function NavItem({ href, icon: Icon, labelKey, label: literalLabel, dot }: NavItemDef) {
   const [location] = useLocation();
   const { t } = useTranslation();
   const active = location === href;
-  const label = t(labelKey);
+  const label = literalLabel ?? t(labelKey);
   return (
     <Link
       href={href}
@@ -96,14 +100,24 @@ function NavItem({ href, icon: Icon, labelKey, dot }: NavItemDef) {
   );
 }
 
+interface EntitledAgent { key: string; name: string; description: string | null }
+
 function AgentNavSection() {
   const { t } = useTranslation();
-  const { data, isLoading } = useQuery<{ slots: string[] }>({
+  const { data, isLoading } = useQuery<{ agents: EntitledAgent[] }>({
     queryKey: ["/api/agent/my-agents"],
   });
 
-  const entitled = new Set(data?.slots ?? []);
-  const items = AGENT_TAB_ORDER.filter((slot) => entitled.has(slot)).map((slot) => AGENT_TAB_META[slot]);
+  const agents = data?.agents ?? [];
+  const byKey = new Map(agents.map((a) => [a.key, a]));
+
+  // Known tabs (with curated icon/label) first, in a stable order; any other
+  // entitled catalog product — sysadmin's own name, a generic icon — after.
+  const known: NavItemDef[] = AGENT_TAB_ORDER.filter((slot) => byKey.has(slot)).map((slot) => AGENT_TAB_META[slot]);
+  const generic: NavItemDef[] = agents
+    .filter((a) => !AGENT_TAB_META[a.key])
+    .map((a) => ({ label: a.name, href: `/admin/agents/${a.key}`, icon: Bot, labelKey: "" }));
+  const items = [...known, ...generic];
 
   return (
     <div>

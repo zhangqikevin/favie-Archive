@@ -19,11 +19,12 @@ import {
 import { syncOpencrawAgent, callOpenclaw } from "./openclaw";
 import { getEffectiveOpenclawConfig, DEFAULT_OPENCLAW_BASE_URL, maskApiKey } from "./openclaw-config";
 import { chatWithAgentSlot, chatWithCatalogKeyUnchecked, NotEntitledError } from "./zoowork-agent";
-import { getEntitledSlotKeys } from "./agent-entitlements";
+import { getEntitledSlots } from "./agent-entitlements";
 import { registerAdminRoutes } from "./admin-routes";
 import { registerMcpProxyRoutes } from "./mcp-proxy";
 import { ensurePreviewUser, ensureFavieDataMcpServer } from "./zoowork-admin";
-import { encryptSecret } from "./crypto";
+import { encryptSecret, decryptSecret } from "./crypto";
+import { startComposioConnection, findComposioConnection } from "./composio-client";
 import { getLogs } from "./log-buffer";
 import * as zwChannels from "./zoowork-channels";
 import { ChannelApiError } from "./zoowork-channels";
@@ -424,7 +425,7 @@ export async function registerRoutes(
     try {
       const { agentId, messages } = z
         .object({
-          agentId: z.enum(["operation", "chef", "social", "customer", "finance", "legal", "expert"]),
+          agentId: z.string().min(1).max(50),
           messages: z
             .array(
               z.object({
@@ -466,15 +467,22 @@ export async function registerRoutes(
     }
   });
 
-  // GET /api/agent/my-agents — which of the 7 agent tabs this user's subscription
-  // actually entitles them to; drives the sidebar's agent list.
+  // GET /api/agent/my-agents — which agent_catalog products this user's subscription
+  // actually entitles them to (any key sysadmin bundled, not just the 7 legacy tabs);
+  // drives the sidebar's agent list.
   app.get("/api/agent/my-agents", async (req, res) => {
     if (!req.isAuthenticated() || !req.user) {
       return res.status(401).json({ message: "Not authenticated" });
     }
     try {
-      const slots = await getEntitledSlotKeys(req.user.id);
-      res.json({ slots });
+      const entitled = await getEntitledSlots(req.user.id);
+      res.json({
+        agents: entitled.map(({ slot, entry }) => ({
+          key: slot,
+          name: entry.name,
+          description: entry.description,
+        })),
+      });
     } catch (err: any) {
       console.error("[agent-api] my-agents error:", err?.stack ?? err?.message ?? JSON.stringify(err));
       res.status(500).json({ message: err.message || "Internal server error" });
@@ -488,7 +496,7 @@ export async function registerRoutes(
       return res.status(401).json({ message: "Not authenticated" });
     }
     try {
-      const { agentId } = z.object({ agentId: z.enum(["operation", "chef", "social", "customer", "finance", "legal", "expert"]) }).parse(req.params);
+      const { agentId } = z.object({ agentId: z.string().min(1).max(50) }).parse(req.params);
       const limit = Math.min(Number(req.query.limit) || 20, 100);
       const before = req.query.before ? Number(req.query.before) : undefined;
       const { messages, hasMore } = await storage.getChatHistory(req.user.id, agentId, limit, before);
@@ -504,7 +512,7 @@ export async function registerRoutes(
       return res.status(401).json({ message: "Not authenticated" });
     }
     try {
-      const { agentId } = z.object({ agentId: z.enum(["operation", "chef", "social", "customer", "finance", "legal", "expert"]) }).parse(req.params);
+      const { agentId } = z.object({ agentId: z.string().min(1).max(50) }).parse(req.params);
       const { messages } = z.object({
         messages: z.array(z.object({
           role: z.string(),
@@ -525,7 +533,7 @@ export async function registerRoutes(
       return res.status(401).json({ message: "Not authenticated" });
     }
     try {
-      const { agentId } = z.object({ agentId: z.enum(["operation", "chef", "social", "customer", "finance", "legal", "expert"]) }).parse(req.params);
+      const { agentId } = z.object({ agentId: z.string().min(1).max(50) }).parse(req.params);
       await storage.clearChatHistory(req.user.id, agentId);
       res.json({ ok: true });
     } catch (err: any) {
@@ -540,7 +548,7 @@ export async function registerRoutes(
     }
     try {
       const { agentId, messageId } = z.object({
-        agentId: z.enum(["operation", "chef", "social", "customer", "finance", "legal", "expert"]),
+        agentId: z.string().min(1).max(50),
         messageId: z.string().regex(/^\d+$/).transform(Number),
       }).parse(req.params);
       const deleted = await storage.deleteChatMessage(req.user.id, agentId, messageId);
@@ -552,7 +560,11 @@ export async function registerRoutes(
   });
 
   // GET /api/mcp/available — MCP servers offered by the "general" agent template,
-  // with whether the current user has already connected each one.
+  // with whether the current user has already connected each one. For OAuth-style
+  // servers (authStyle "query_param_shared_key") not yet connected locally, this
+  // also checks Composio directly and self-heals: an ACTIVE remote connection the
+  // user finished via the hosted OAuth page gets its local credential row created
+  // here, and a still-in-flight one is reported as "pending" instead of "connected".
   app.get("/api/mcp/available", async (req, res) => {
     if (!req.isAuthenticated() || !req.user) {
       return res.status(401).json({ message: "Not authenticated" });
@@ -563,14 +575,57 @@ export async function registerRoutes(
       const servers = await storage.getMcpServersForAgent(entry.id);
       const creds = await storage.listUserMcpCredentials(req.user.id);
       const connectedIds = new Set(creds.map((c) => c.mcpServerId));
-      res.json({
-        mcpServers: servers.map((s) => ({
-          id: s.id, key: s.key, name: s.name, description: s.description,
-          connected: connectedIds.has(s.id),
-        })),
-      });
+
+      const mcpServers = await Promise.all(
+        servers.map(async (s) => {
+          const base = { id: s.id, key: s.key, name: s.name, description: s.description, authStyle: s.authStyle };
+          if (connectedIds.has(s.id)) return { ...base, connected: true, pending: false };
+          if (s.authStyle !== "query_param_shared_key" || !s.oauthConfigId || !s.encryptedAdminKey) {
+            return { ...base, connected: false, pending: false };
+          }
+          try {
+            const adminKey = decryptSecret(s.encryptedAdminKey);
+            const remote = await findComposioConnection(adminKey, s.oauthConfigId, req.user!.id);
+            if (remote?.status === "ACTIVE") {
+              await storage.upsertUserMcpCredential(req.user!.id, s.id, encryptSecret(req.user!.id));
+              return { ...base, connected: true, pending: false };
+            }
+            const pending = remote ? !["FAILED", "EXPIRED"].includes(remote.status) : false;
+            return { ...base, connected: false, pending };
+          } catch {
+            return { ...base, connected: false, pending: false };
+          }
+        }),
+      );
+      res.json({ mcpServers });
     } catch (err: any) {
       res.status(500).json({ message: err.message || "Failed to list MCP servers" });
+    }
+  });
+
+  // POST /api/mcp/connect-oauth — start a hosted Composio connection for an
+  // OAuth-style server. Returns a redirect_url for the client to open; the
+  // callback just lands back on the Connectors page, which polls /api/mcp/available
+  // to notice the new connection (see self-heal above) rather than us needing a
+  // dedicated server-side OAuth callback route.
+  app.post("/api/mcp/connect-oauth", async (req, res) => {
+    if (!req.isAuthenticated() || !req.user) {
+      return res.status(401).json({ message: "Not authenticated" });
+    }
+    try {
+      const { mcpServerId } = z.object({ mcpServerId: z.string().min(1) }).parse(req.body);
+      const server = await storage.getMcpServer(mcpServerId);
+      if (!server) return res.status(404).json({ message: "MCP server not found" });
+      if (server.authStyle !== "query_param_shared_key" || !server.oauthConfigId || !server.encryptedAdminKey) {
+        return res.status(400).json({ message: "This connector does not support OAuth connect" });
+      }
+      const adminKey = decryptSecret(server.encryptedAdminKey);
+      const callbackUrl = `${req.protocol}://${req.get("host")}/admin/connectors`;
+      const { redirectUrl } = await startComposioConnection(adminKey, server.oauthConfigId, req.user.id, callbackUrl);
+      res.json({ redirectUrl });
+    } catch (err: any) {
+      if (err?.name === "ZodError") return res.status(400).json({ message: err.errors[0]?.message || "Invalid input" });
+      res.status(500).json({ message: err.message || "Failed to start connection" });
     }
   });
 

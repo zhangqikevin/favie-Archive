@@ -241,6 +241,7 @@ export const mcpServers = pgTable("mcp_servers", {
   // on targetUrl to select which connected account the call runs as.
   authStyle: varchar("auth_style", { length: 30 }).notNull().default("header_secret"),
   encryptedAdminKey: text("encrypted_admin_key"),           // only set when authStyle is query_param_shared_key
+  oauthConfigId: text("oauth_config_id"),                   // Composio auth_config_id, used to start a new OAuth connection
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
 });

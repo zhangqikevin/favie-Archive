@@ -335,6 +335,7 @@
     "agent_market": "Mercado de Agentes",
     "activity": "Actividad",
     "files": "Archivos",
+    "connectors": "Conectores",
     "settings": "Configuración",
     "restaurant_label": "Restaurante",
     "manage_restaurants": "Gestionar restaurantes",
@@ -788,6 +789,18 @@
     "cat_creators": "Creadores",
     "cat_retention": "Retención"
   },
+  "connectors_page": {
+    "title": "Conectores",
+    "subtitle": "Conecta tus propias cuentas para que tus agentes puedan usarlas.",
+    "status_connected": "Conectado",
+    "status_pending": "Conectando…",
+    "button_connect": "Conectar",
+    "button_disconnect": "Desconectar",
+    "button_opening": "Abriendo…",
+    "paste_key_placeholder": "Pega tu clave de API",
+    "paste_key_connect": "Conectar",
+    "empty": "Aún no hay conectores disponibles."
+  },
   "activity": {
     "title": "Actividad",
     "subtitle": "Todo lo que tu equipo de IA ha hecho, marcado o puesto en cola para tu revisión.",
@@ -1080,6 +1093,7 @@
     "chat_thinking": "{{name}} está pensando…",
     "chat_error_fallback": "Lo siento, tengo problemas para conectarme ahora mismo. Por favor, inténtalo de nuevo en un momento.",
     "hire_task_title": "{{name}} — Suscripción mensual",
+    "generic_init_msg": "Hola, soy {{name}}. ¿En qué puedo ayudarte?",
     "op_name": "Agente de Operaciones",
     "op_role": "Crecimiento del negocio y operaciones de entrega",
     "op_desc": "Monitorea el crecimiento general de ingresos y pedidos, la eficiencia del gasto en anuncios de entrega, el rendimiento de la plataforma y recomienda ajustes de presupuesto y promociones.",

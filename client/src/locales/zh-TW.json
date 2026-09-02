@@ -335,6 +335,7 @@
     "agent_market": "Agent 市場",
     "activity": "活動記錄",
     "files": "檔案",
+    "connectors": "連接器",
     "settings": "設定",
     "restaurant_label": "餐廳",
     "manage_restaurants": "管理餐廳",
@@ -788,6 +789,18 @@
     "cat_creators": "創作者",
     "cat_retention": "留存"
   },
+  "connectors_page": {
+    "title": "連接器",
+    "subtitle": "連接你自己的帳號，讓你的 Agent 可以使用它們。",
+    "status_connected": "已連接",
+    "status_pending": "連接中…",
+    "button_connect": "連接",
+    "button_disconnect": "中斷連接",
+    "button_opening": "開啟中…",
+    "paste_key_placeholder": "貼上你的 API key",
+    "paste_key_connect": "連接",
+    "empty": "暫時還沒有可用的連接器。"
+  },
   "activity": {
     "title": "活動記錄",
     "subtitle": "您的 AI 團隊已完成、標記或排隊等待審核的所有事項。",
@@ -1080,6 +1093,7 @@
     "chat_thinking": "{{name}}正在思考…",
     "chat_error_fallback": "抱歉，連接暫時出現問題，請稍後重試。",
     "hire_task_title": "{{name}} — 月度訂閱",
+    "generic_init_msg": "你好,我是 {{name}},有什麼可以幫你的?",
     "op_name": "運營智能體",
     "op_role": "業務成長與外送運營",
     "op_desc": "監控整體收入和訂單成長、外送廣告支出效率、平台表現，並提供預算和促銷調整建議。",

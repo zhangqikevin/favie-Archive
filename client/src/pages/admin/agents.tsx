@@ -46,6 +46,17 @@ import {
 
 type AgentId = "operation" | "chef" | "social" | "customer" | "finance" | "legal" | "expert";
 
+// Only these 7 have curated marketing copy/task menus below (AGENT_CONFIGS, AGENT_TASKS,
+// etc). Any other agent_catalog key a subscription entitles the user to (see
+// server/agent-entitlements.ts) still routes here, but useAgentConfig gives it a plain,
+// generic config instead of pretending it's one of these seven.
+const KNOWN_AGENT_IDS = new Set<string>(["operation", "chef", "social", "customer", "finance", "legal", "expert"]);
+function isKnownAgentId(id: string): id is AgentId {
+  return KNOWN_AGENT_IDS.has(id);
+}
+
+interface EntitledAgent { key: string; name: string; description: string | null }
+
 interface ToolStep {
   toolName: string;
   args?: Record<string, unknown>;
@@ -2162,6 +2173,10 @@ function useAgentTasks(agentId: AgentId) {
 
 function useAgentConfig(agentId: AgentId) {
   const { t } = useTranslation();
+  // Called unconditionally (rules of hooks) — only consumed below when agentId isn't
+  // one of the 7 known tabs, but agentId can change across renders of this same
+  // mounted component (client-side nav between tabs), so this can't be conditional.
+  const { data: myAgentsData } = useQuery<{ agents: EntitledAgent[] }>({ queryKey: ["/api/agent/my-agents"] });
 
   const translatedConfigs: Record<AgentId, Pick<AgentConfig, "name" | "role" | "description" | "contextStats" | "initialMessages" | "chips">> = {
     operation: {
@@ -2292,6 +2307,24 @@ function useAgentConfig(agentId: AgentId) {
       chips: [],
     },
   };
+
+  if (!isKnownAgentId(agentId)) {
+    // Generic catalog product (sysadmin-authored, no curated marketing copy here) —
+    // use its own name/description instead of borrowing one of the 7 tabs' content.
+    const entry = myAgentsData?.agents.find((a) => a.key === agentId);
+    const name = entry?.name ?? agentId;
+    return {
+      name,
+      role: "",
+      description: entry?.description ?? "",
+      icon: MessageSquare,
+      avatar: "bg-primary",
+      badge: "",
+      contextStats: [],
+      initialMessages: [{ text: t("agents_page.generic_init_msg", { name }), content: null }],
+      chips: [],
+    };
+  }
 
   const base = AGENT_CONFIGS[agentId] ?? AGENT_CONFIGS.operation;
   const translated = translatedConfigs[agentId] ?? translatedConfigs.operation;
@@ -2871,7 +2904,7 @@ export default function AgentChatPage() {
                       {msg.role === "ai" ? <ChatMarkdown text={msg.text} /> : msg.text}
                     </MessageBubble>
                     {msg.content && <div>{msg.content}</div>}
-                    {msg.id === "init-0" && (
+                    {msg.id === "init-0" && isKnownAgentId(agentId) && (
                       <AgentIntroContent
                         agentId={agentId}
                         agentName={config.name}

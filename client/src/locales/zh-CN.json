@@ -335,6 +335,7 @@
     "agent_market": "Agent 市场",
     "activity": "活动记录",
     "files": "文件",
+    "connectors": "连接器",
     "settings": "设置",
     "restaurant_label": "餐厅",
     "manage_restaurants": "管理餐厅",
@@ -788,6 +789,18 @@
     "cat_creators": "创作者",
     "cat_retention": "留存"
   },
+  "connectors_page": {
+    "title": "连接器",
+    "subtitle": "连接你自己的账号，让你的 Agent 可以使用它们。",
+    "status_connected": "已连接",
+    "status_pending": "连接中…",
+    "button_connect": "连接",
+    "button_disconnect": "断开连接",
+    "button_opening": "打开中…",
+    "paste_key_placeholder": "粘贴你的 API key",
+    "paste_key_connect": "连接",
+    "empty": "暂时还没有可用的连接器。"
+  },
   "activity": {
     "title": "活动记录",
     "subtitle": "您的 AI 团队已完成、标记或排队等待审核的所有事项。",
@@ -1080,6 +1093,7 @@
     "chat_thinking": "{{name}}正在思考…",
     "chat_error_fallback": "抱歉，连接暂时出现问题，请稍后重试。",
     "hire_task_title": "{{name}} — 月度订阅",
+    "generic_init_msg": "你好,我是 {{name}},有什么可以帮你的?",
     "op_name": "运营智能体",
     "op_role": "业务增长与外卖运营",
     "op_desc": "监控整体收入和订单增长、外卖广告支出效率、平台表现，并提供预算和促销调整建议。",

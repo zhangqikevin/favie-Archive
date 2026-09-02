@@ -335,6 +335,7 @@
     "agent_market": "Agent Market",
     "activity": "Activity",
     "files": "Files",
+    "connectors": "Connectors",
     "settings": "Settings",
     "restaurant_label": "Restaurant",
     "manage_restaurants": "Manage restaurants",
@@ -788,6 +789,18 @@
     "cat_creators": "Creators",
     "cat_retention": "Retention"
   },
+  "connectors_page": {
+    "title": "Connectors",
+    "subtitle": "Connect your own accounts so your agents can use them.",
+    "status_connected": "Connected",
+    "status_pending": "Connecting…",
+    "button_connect": "Connect",
+    "button_disconnect": "Disconnect",
+    "button_opening": "Opening…",
+    "paste_key_placeholder": "Paste your API key",
+    "paste_key_connect": "Connect",
+    "empty": "No connectors available yet."
+  },
   "activity": {
     "title": "Activity",
     "subtitle": "Everything your AI team has done, flagged, or queued for your review.",
@@ -1080,6 +1093,7 @@
     "chat_thinking": "{{name}} is thinking…",
     "chat_error_fallback": "Sorry, I'm having trouble connecting right now. Please try again in a moment.",
     "hire_task_title": "{{name}} — Monthly Subscription",
+    "generic_init_msg": "Hi, I'm {{name}}. What can I help you with?",
     "op_name": "Operation Agent",
     "op_role": "Business Growth & Delivery Operations",
     "op_desc": "Monitors overall revenue and order growth, delivery ad spend efficiency, platform performance, and recommends budget and promotion adjustments.",

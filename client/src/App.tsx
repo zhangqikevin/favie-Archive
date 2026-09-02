@@ -31,6 +31,7 @@ import AdminLoyalty from "@/pages/admin/loyalty";
 import AdminSettings from "@/pages/admin/settings";
 import AdminActivity from "@/pages/admin/activity";
 import AdminFiles from "@/pages/admin/files";
+import AdminConnectors from "@/pages/admin/connectors";
 import TaskMarket from "@/pages/admin/task-market";
 import AgentMarket from "@/pages/admin/agent-market";
 import AgentChatPage from "@/pages/admin/agents";
@@ -88,6 +89,7 @@ function Router() {
         <Route path="/admin/agents/:agentId" component={AgentChatPage} />
         <Route path="/admin/activity" component={AdminActivity} />
         <Route path="/admin/files" component={AdminFiles} />
+        <Route path="/admin/connectors" component={AdminConnectors} />
         <Route path="/admin/task-market" component={TaskMarket} />
         <Route path="/admin/agent-market" component={AgentMarket} />
         <Route path="/ubereats-lab" component={UberEatsLab} />
