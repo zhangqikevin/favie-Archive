@@ -38,6 +38,11 @@ export class NotEntitledError extends Error {
 
 // key: `${userId}:${slot}` -> ZooWork session id
 const sessions = new Map<string, string>();
+// key: `${userId}:${slot}` -> last-seen stream cursor for that session. streamEvents()
+// replays a session's *entire* persistent event log from the start when called with no
+// cursor — without this, every turn after the first would re-stream turn 1's events, hit
+// turn 1's run.finished first, and return turn 1's answer again instead of the new turn's.
+const cursors = new Map<string, string>();
 
 /** User-initiated chat — requires the user's subscription to actually entitle them to `slot`. */
 export async function chatWithAgentSlot(
@@ -89,6 +94,7 @@ async function chatWithCatalogEntry(
 
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), CHAT_TIMEOUT_MS);
+  let cursor = cursors.get(key);
   try {
     let text = "";
     // toolCallId -> in-progress step; 'start' seeds it (toolName, args), 'end'
@@ -96,7 +102,8 @@ async function chatWithCatalogEntry(
     // what the UI sees, which matches how Claude Code lists finished calls.
     const stepsById = new Map<string, ChatToolStep>();
     const stepOrder: string[] = [];
-    for await (const ev of zc.streamEvents(agentId, sessionId, { signal: ctl.signal })) {
+    for await (const ev of zc.streamEvents(agentId, sessionId, cursor ? { cursor, signal: ctl.signal } : { signal: ctl.signal })) {
+      cursor = ev.cursor ?? cursor;
       text += assistantText(ev);
       const call = toolCall(ev);
       if (call) {
@@ -122,6 +129,7 @@ async function chatWithCatalogEntry(
     }
     throw err;
   } finally {
+    if (cursor) cursors.set(key, cursor);
     clearTimeout(timer);
   }
 }
